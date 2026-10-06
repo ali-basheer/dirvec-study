@@ -1,0 +1,1043 @@
+#!/usr/bin/env python3
+"""dirvec session 27 (BRIEF.md, session 27): the budget between one and eight vectors (27B), the seed of
+the k-means (27C) and queries written by a person (27A).
+
+27B and 27C, leave-one-out file queries, from the cached vectors (CPU):
+
+  s27.py budget --set s11 --emb data/emb/jina-embeddings-v4_s11 --enc E1 --calib-seed 20261102 \
+                --check data/emb/jina-embeddings-v4_s11/ranks_s11_e1.jsonl \
+                --check data/ranks_s21_s11_e1.jsonl.gz --out data/s27_s11_e1.npz
+  s27.py seeds  (the same arguments, --out data/s27seeds_s11_e1.npz)
+  s27.py budget --set s24 --emb data/emb/jina-embeddings-v4_s24 --enc E1 --calib-seed 20261104 \
+                --check data/ranks_s24_e1.jsonl.gz --flags data/flags_s24.jsonl.gz --uncentered-only \
+                --out data/s27_s24_e1.npz
+  s27.py report data/s27_*.npz data/s27seeds_*.npz > results/session27_budget_outputs.md
+
+27A, queries written by a person (the queries come from the tool of scripts/humanq_tool.py):
+
+  s27.py human-embed --model jina-embeddings-v4 --emb data/emb/jina-embeddings-v4_s11 \
+                     --queries data/humanq_s11.jsonl
+  s27.py human-eval  --enc E1 --emb data/emb/jina-embeddings-v4_s11 --queries data/humanq_s11.jsonl \
+                     --sample data/humanq_sample_s11.jsonl --check-titles /workspace/logs/s17/descq_ranks_e1.jsonl \
+                     --out data/s27_human_e1.npz
+  s27.py human-report data/s27_human_*.npz > results/session27_outputs.md
+
+Rows of 27B, each uncentered and centered (suffix c), all built with eval.py's kreps (scikit-learn
+KMeans, n_init 10, random_state 0 unless a seed is named, centroids renormalised):
+  Lk  labelled: per modality label min(k, n_label) centroids, k = 1..5 (L3 is c, L3c is cc)
+  BK  blind: min(K, n) centroids over all the folder's vectors, K in 2, 3, 4, 5, 6, 8 (B2 is tb2, B2c tb2c)
+  Mk  blind at the labelled budget: as many centroids over all vectors as Lk keeps for that folder
+      (M3 is session 9's tbc)
+  a, ac, d, dc as eval.py.
+27C rows: L3 and B2c at random_state 0, 1, 2 (L3s0, L3s1, L3s2, B2cs0, ...), with a.
+
+The query's own folder is rebuilt without the query; every other folder keeps its full representation; a
+folder scores the maximum cosine over its vectors; rank 1 plus the number of folders scoring strictly
+higher, in float32, as eval.py ranks. The labelled rows re-cluster only the query's own label (the other
+labels' centroids are the same arrays eval.py builds, since KMeans is deterministic for a given input
+and seed). A gate compares every row a stored eval.py ranks file holds with this script's ranks, query
+by query, before the report prints any number of the set.
+"""
+import argparse
+import concurrent.futures as cf
+import gzip
+import json
+import multiprocessing as mp
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import warnings
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import eval as ev  # noqa: E402
+
+LK = (1, 2, 3, 4, 5)
+BK = (2, 3, 4, 5, 6, 8)
+SEEDS27C = (0, 1, 2)
+IMAGE_INPUTS = ("image", "pdf_scanned")
+TEXTLIKE = ("text", "table", "pdf_text", "other")
+CELL_SEEDS = {"all": 1, "P1": 50, "P2": 51, "M1": 56, "M2": 57}      # eval.py's cell seeds
+GH_SEEDS = {"all": 27101, "P1s": 27102, "P2s": 27103}
+NEG_INF = np.float32(-np.inf)
+# stored eval.py rank columns that a row of this script must reproduce
+STORED = {"a": "rank_a", "ac": "rank_ac", "d": "rank_d", "dc": "rank_dc", "L3": "rank_c", "L3c": "rank_cc",
+          "B2": "rank_tb2", "B2c": "rank_tb2c", "M3": "rank_tbc", "M3c": "rank_tbcc",
+          "L3s0": "rank_c", "B2cs0": "rank_tb2c"}
+STORED_F32 = {"a": "rank_a_f32", "L3": "rank_c_f32", "d": "rank_d_f32", "L3s0": "rank_c_f32"}
+ROW_RE = re.compile(r"^(L|B|M)(\d)(c?)(?:s(\d))?$")
+T0 = time.time()
+
+
+def log(msg):
+    sys.stderr.write("[%7.1fs] %s\n" % (time.time() - T0, msg))
+    sys.stderr.flush()
+
+
+def jl(path):
+    p = path if os.path.isabs(path) else os.path.join(ROOT, path)
+    with (gzip.open(p, "rt") if p.endswith(".gz") else open(p)) as fh:
+        return [json.loads(l) for l in fh if l.strip()]
+
+
+def parse_row(row):
+    """(family, parameter, space, seed): family in a, d, L, B, M; space u (uncentered) or c."""
+    if row in ("a", "ac", "d", "dc"):
+        return row[0], None, "c" if row.endswith("c") else "u", 0
+    m = ROW_RE.match(row)
+    if not m:
+        raise ValueError(row)
+    return m.group(1), int(m.group(2)), "c" if m.group(3) else "u", int(m.group(4) or 0)
+
+
+def budget_rows(uncentered_only=False):
+    rows = ["a", "d"] + [f"L{k}" for k in LK] + [f"B{k}" for k in BK] + [f"M{k}" for k in LK]
+    if not uncentered_only:
+        rows += ["ac", "dc"] + [f"L{k}c" for k in LK] + [f"B{k}c" for k in BK] + [f"M{k}c" for k in LK]
+    return rows
+
+
+def seed_rows():
+    return ["a"] + [f"L3s{s}" for s in SEEDS27C] + [f"B2cs{s}" for s in SEEDS27C]
+
+
+def label_budget(counts, k):
+    """Lk's number of centroids for a folder with these label counts."""
+    return int(sum(min(k, c) for c in counts if c > 0))
+
+
+# ------------------------------------------------------------------ the world
+def load_world(cfg):
+    """Manifest, cache, ranked folders, evaluation queries (eval.py's order) and the spaces."""
+    from types import SimpleNamespace
+    w = SimpleNamespace()
+    man = jl(cfg["manifest"])
+    index = jl(os.path.join(cfg["emb"], "index.jsonl"))
+    assert [r["path"] for r in index] == [r["path"] for r in man], "cache not in manifest order"
+    assert all(r.get("done") for r in index), "cache incomplete"
+    w.ok = np.array([bool(r["ok"]) for r in index])
+    w.mod = np.array([r["modality"] for r in man])
+    dirs = {r["dir"]: r for r in jl(cfg["dirs"])}
+    w.ranked = sorted(d for d, r in dirs.items() if r["n_files"] >= 3)
+    w.cal = ev.calib_split(dirs, 0.2, cfg["calib_seed"])
+    kids = {}
+    for i, r in enumerate(man):
+        if w.ok[i] and r["dir"] in dirs:
+            kids.setdefault(r["dir"], []).append(i)
+    w.children = {d: np.array(v, np.int64) for d, v in kids.items()}
+    row_of = {r["path"]: i for i, r in enumerate(man)}
+    w.queries = []
+    for g in jl(cfg["gt"]):
+        i = row_of.get(g["query_path"])
+        if g["relevant_dir"] in w.cal or i is None or not w.ok[i]:
+            continue
+        w.queries.append((g, i))
+    w.by_dir = {}
+    for qpos, (g, i) in enumerate(w.queries):
+        w.by_dir.setdefault(g["relevant_dir"], []).append((qpos, i))
+    w.S = {"u": np.load(os.path.join(cfg["emb"], "vectors.npy"), mmap_mode="r")}
+    if cfg.get("vc"):
+        w.S["c"] = np.load(cfg["vc"], mmap_mode="r")
+    w.dim = w.S["u"].shape[1]
+    w.rows = cfg["rows"]
+    return w, man, dirs
+
+
+_W = None
+
+
+def _init_worker(cfg):
+    global _W
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(limits=1)
+    except Exception:  # noqa: BLE001
+        pass
+    _W = load_world(cfg)[0]
+
+
+def work_chunk(dir_names):
+    """Per folder: the full representation of every row; per evaluation query in it: the score of its
+    own folder rebuilt without it, for every row, and the number of other files of its input group."""
+    w = _W
+    rows = w.rows
+    parsed = {r: parse_row(r) for r in rows}
+    spaces = sorted({parsed[r][2] for r in rows})
+    full_out, own_out = [], []
+    for D in dir_names:
+        ch = w.children.get(D)
+        if ch is None:
+            z = np.zeros((0, w.dim), np.float32)
+            full_out.append((D, {r: z for r in rows}))
+            continue
+        labs = w.mod[ch]
+        n = len(ch)
+        X = {sp: np.array(w.S[sp][ch], dtype=np.float32) for sp in spaces}
+        lab_idx = [(L, np.nonzero(labs == L)[0]) for L in ev.MODALITIES if (labs == L).any()]
+        counts = [len(ix) for _, ix in lab_idx]
+        lcache, kcache = {}, {}
+
+        def label_full(sp, seed, L, ix, k):
+            key = (sp, seed, L, k)
+            if key not in lcache:
+                lcache[key] = ev.kreps(X[sp][ix], seed=seed, k=k)
+            return lcache[key]
+
+        def blind_full(sp, seed, k):
+            key = (sp, seed, k)
+            if key not in kcache:
+                kcache[key] = ev.kreps(X[sp], seed=seed, k=k)
+            return kcache[key]
+
+        full = {}
+        for r in rows:
+            fam, p, sp, seed = parsed[r]
+            if fam == "a":
+                full[r] = ev.build("a", X[sp], labs)
+            elif fam == "d":
+                full[r] = X[sp]
+            elif fam == "L":
+                full[r] = np.concatenate([label_full(sp, seed, L, ix, min(p, len(ix))) for L, ix in lab_idx])
+            elif fam == "B":
+                full[r] = blind_full(sp, seed, min(p, n))
+            else:
+                full[r] = blind_full(sp, seed, label_budget(counts, p))
+        full_out.append((D, full))
+
+        img_all = np.isin(labs, IMAGE_INPUTS)
+        for qpos, mi in w.by_dir.get(D, ()):
+            pos = np.nonzero(ch == mi)[0]
+            assert pos.size == 1, (D, mi)
+            pos = int(pos[0])
+            keep = np.ones(n, bool)
+            keep[pos] = False
+            sib = int((img_all[keep] == img_all[pos]).sum())
+            scores = {}
+            if not keep.any():
+                own_out.append((qpos, {r: NEG_INF for r in rows}, sib))
+                continue
+            qlab = labs[pos]
+            counts_l = [c - (1 if L == qlab else 0) for (L, _), c in zip(lab_idx, counts)]
+            okc = {}
+            for r in rows:
+                fam, p, sp, seed = parsed[r]
+                q = X[sp][pos]
+                if fam == "a":
+                    R = ev.build("a", X[sp][keep], labs[keep])
+                elif fam == "d":
+                    R = X[sp][keep]
+                elif fam == "L":
+                    parts = []
+                    for L, ix in lab_idx:
+                        if L == qlab:
+                            rest = ix[ix != pos]
+                            if len(rest):
+                                parts.append(ev.kreps(X[sp][rest], seed=seed, k=min(p, len(rest))))
+                        else:
+                            parts.append(label_full(sp, seed, L, ix, min(p, len(ix))))
+                    R = np.concatenate(parts)
+                else:
+                    k = min(p, n - 1) if fam == "B" else label_budget(counts_l, p)
+                    key = (sp, seed, k)
+                    if key not in okc:
+                        okc[key] = ev.kreps(X[sp][keep], seed=seed, k=k)
+                    R = okc[key]
+                scores[r] = np.float32((R @ q).max()) if len(R) else NEG_INF
+            own_out.append((qpos, scores, sib))
+    return full_out, own_out
+
+
+def segments(blocks):
+    counts = np.array([b.shape[0] for b in blocks], np.int64)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    nonempty = np.nonzero(counts > 0)[0]
+    M = np.ascontiguousarray(np.concatenate([b for b in blocks if b.shape[0]]).astype(np.float32))
+    return M, starts[nonempty], nonempty
+
+
+def max_per_directory(Q, M, starts, nonempty, n_ranked):
+    S = (np.concatenate([Q, Q]) @ M.T)[:1] if Q.shape[0] == 1 else Q @ M.T
+    out = np.full((Q.shape[0], n_ranked), -np.inf, np.float32)
+    out[:, nonempty] = np.maximum.reduceat(S, starts, axis=1)
+    return out
+
+
+# ------------------------------------------------------------------ score (budget, seeds)
+def score(args, rows):
+    sfx = "_" + args.set
+    cfg = dict(manifest=os.path.join(ROOT, f"data/manifest{sfx}.jsonl"), dirs=os.path.join(ROOT, f"data/dirs{sfx}.jsonl"),
+               gt=os.path.join(ROOT, f"data/gt_structural{sfx}.jsonl"),
+               emb=args.emb if os.path.isabs(args.emb) else os.path.join(ROOT, args.emb),
+               calib_seed=args.calib_seed, rows=rows)
+    tmpdir = None
+    if any(parse_row(r)[2] == "c" for r in rows):
+        w0, man, dirs = load_world(cfg)
+        V = np.load(os.path.join(cfg["emb"], "vectors.npy"))
+        mods_all = np.array([r["modality"] for r in man])
+        calib, is_img, in_calib, mu, Vc = ev.centered_space(V, w0.ok, mods_all, man, dirs, 0.2, args.calib_seed)
+        assert calib == w0.cal
+        tmpdir = tempfile.mkdtemp(prefix="s27_", dir=args.tmp)
+        cfg["vc"] = os.path.join(tmpdir, "vc.npy")
+        np.save(cfg["vc"], Vc)
+        del V, Vc
+    w, man, dirs = load_world(cfg)
+    ranked = w.ranked
+    nR = len(ranked)
+    pos_of = {d: j for j, d in enumerate(ranked)}
+    nq = len(w.queries)
+    log(f"{args.set} {args.enc}: {nR} ranked folders, {nq} evaluation queries, {len(rows)} rows: {' '.join(rows)}")
+
+    if args.set in ("s19", "s24"):
+        grp_of = {d: dirs[d].get("owner") or f"record:{dirs[d]['record']}" for d in ranked}
+    else:
+        sel = {r["id"]: r for r in jl(f"data/selection_{args.set}.jsonl")}
+
+        def fam(d):
+            cr = sel[dirs[d]["record"]].get("creators") or []
+            return cr[0].strip().lower() if cr else f"record:{dirs[d]['record']}"
+        grp_of = {d: fam(d) for d in ranked}
+
+    own = {r: np.full(nq, -np.inf, np.float32) for r in rows}
+    sib_same = np.zeros(nq, np.int64)
+    full = {}
+    chunks = [ranked[i:i + 8] for i in range(0, nR, 8)]
+    done = [0]
+
+    def take(res):
+        fo, ow = res
+        for D, F in fo:
+            full[D] = F
+        for qpos, sc, sb in ow:
+            for r in rows:
+                own[r][qpos] = sc[r]
+            sib_same[qpos] = sb
+        done[0] += 1
+        if done[0] % 50 == 0:
+            log(f"phase 1: {done[0]}/{len(chunks)} chunks")
+
+    procs = max(1, min(args.procs, os.cpu_count() or 1))
+    ok_pool = False
+    if procs > 1:
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ[var] = "1"
+        try:
+            with cf.ProcessPoolExecutor(max_workers=procs, mp_context=mp.get_context("spawn"),
+                                        initializer=_init_worker, initargs=(cfg,)) as ex:
+                for res in ex.map(work_chunk, chunks):
+                    take(res)
+            ok_pool = True
+        except (OSError, cf.process.BrokenProcessPool) as exc:
+            log(f"worker pool failed ({exc}); phase 1 again in this process")
+            full.clear()
+            done[0] = 0
+    if not ok_pool:
+        global _W
+        _W = w
+        for c in chunks:
+            take(work_chunk(c))
+    log("phase 1 done")
+
+    q_rows = np.array([i for _, i in w.queries], np.int64)
+    q_dir = np.array([pos_of[g["relevant_dir"]] for g, _ in w.queries], np.int64)
+    R = {r: np.zeros(nq, np.int64) for r in rows}
+    nvec = {}
+    for r in rows:
+        blocks = [full[D][r] for D in ranked]
+        nvec[r] = float(np.mean([b.shape[0] for b in blocks]))
+        M, st, ne = segments(blocks)
+        sp = parse_row(r)[2]
+        for b0 in range(0, nq, args.block):
+            b1 = min(b0 + args.block, nq)
+            Q = np.array(w.S[sp][q_rows[b0:b1]], dtype=np.float32)
+            S = max_per_directory(Q, M, st, ne, nR)
+            rr = np.arange(b1 - b0)
+            S[rr, q_dir[b0:b1]] = -np.inf
+            R[r][b0:b1] = 1 + (S > own[r][b0:b1][:, None]).sum(axis=1)
+        log(f"phase 2: {r} done ({nvec[r]:.2f} vectors per folder)")
+
+    # gates
+    qpaths = [g["query_path"] for g, _ in w.queries]
+    gate = {"queries": nq, "checks": []}
+    ok_all = True
+    for path in args.check or []:
+        if not os.path.exists(path if os.path.isabs(path) else os.path.join(ROOT, path)):
+            gate["checks"].append({"file": path, "missing": True})       # noted; another file must compare rows
+            continue
+        chk = {g["query_path"]: g for g in jl(path)}
+        first = next(iter(chk.values()))
+        entry = {"file": path, "queries_in_file": len(chk), "missing_here": sum(1 for p in qpaths if p not in chk),
+                 "rows": {}}
+        if len(chk) != nq or entry["missing_here"]:
+            ok_all = False
+        for r in rows:
+            for table in (STORED, STORED_F32):
+                key = table.get(r)
+                if key and key in first:
+                    want = np.array([chk[p][key] if p in chk else -1 for p in qpaths])
+                    nd = int((want != R[r]).sum())
+                    entry["rows"][f"{r}={key}"] = nd
+                    ok_all &= nd == 0
+        gate["checks"].append(entry)
+    if args.flags:
+        fl = {g["query_path"]: g for g in jl(args.flags)}
+        nd = int(sum(1 for k, p in enumerate(qpaths) if p not in fl or fl[p]["sib_same"] != sib_same[k]))
+        gate["sib_same_differ"] = nd
+        ok_all &= nd == 0
+    gate["rows_compared"] = sum(len(c.get("rows", {})) for c in gate["checks"])
+    gate["pass"] = bool(ok_all and gate["rows_compared"] > 0)
+    log(f"gates: {json.dumps(gate)}")
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True,
+                                text=True).stdout.strip()
+    except Exception:  # noqa: BLE001
+        commit = "?"
+    import sklearn
+    meta = dict(kind=args.cmd, set=args.set, enc=args.enc, emb=args.emb, calib_seed=args.calib_seed, rows=rows,
+                n_ranked=nR, nvec=nvec, commit=commit, sklearn=sklearn.__version__, numpy=np.__version__,
+                seconds=round(time.time() - T0, 1), gate=gate)
+    out = args.out if os.path.isabs(args.out) else os.path.join(ROOT, args.out)
+    np.savez_compressed(
+        out, meta=np.array(json.dumps(meta)), qpath=np.array(qpaths), qdir=q_dir,
+        qdirname=np.array([g["relevant_dir"] for g, _ in w.queries]),
+        grp=np.array([grp_of[g["relevant_dir"]] for g, _ in w.queries]),
+        modality=np.array([g["modality"] for g, _ in w.queries]),
+        bucket=np.array([g["image_frac_bucket"] for g, _ in w.queries]),
+        sib_same=sib_same, **{f"rank_{r}": R[r].astype(np.int32) for r in rows})
+    if tmpdir:
+        try:
+            os.remove(cfg["vc"])
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+    print(json.dumps(meta))
+    return 0 if gate["pass"] else 3
+
+
+# ------------------------------------------------------------------ statistics
+def boot_ci(z, groups, seed, B=1000, weighted=False, q98=False):
+    """validity.boot_mean with the 98.33 percent interval from the same resamples: point, (lo, hi),
+    (lo98, hi98), number of groups. weighted=False is eval.py's directory bootstrap when the groups are
+    the directories and the seed is the cell's."""
+    keys = sorted(set(groups.tolist() if hasattr(groups, "tolist") else groups))
+    gi = {k: i for i, k in enumerate(keys)}
+    g = np.array([gi[k] for k in groups])
+    zs = np.bincount(g, weights=z, minlength=len(keys))
+    ns = np.bincount(g, minlength=len(keys)).astype(float)
+    idx = np.random.default_rng(seed).integers(0, len(keys), size=(B, len(keys)))
+    if weighted:
+        gm = zs / ns
+        point, bs = gm.mean(), gm[idx].mean(axis=1)
+    else:
+        point, bs = z.mean(), zs[idx].sum(axis=1) / ns[idx].sum(axis=1)
+    lo, hi = np.percentile(bs, [2.5, 97.5])
+    lo98, hi98 = np.percentile(bs, [100 * 0.05 / 6, 100 * (1 - 0.05 / 6)])
+    return float(point), (float(lo), float(hi)), (float(lo98), float(hi98)), len(keys)
+
+
+def oboot(z, owners, seed, B=10000):
+    """s19.oboot: the mean over owners of each owner's mean; 95 and 98.33 percent intervals."""
+    keys = sorted(set(owners.tolist()))
+    gi = {k: i for i, k in enumerate(keys)}
+    g = np.array([gi[k] for k in owners])
+    gm = np.bincount(g, weights=z, minlength=len(keys)) / np.bincount(g, minlength=len(keys))
+    rng = np.random.default_rng(seed)
+    bs = np.empty(B)
+    for i0 in range(0, B, 1000):
+        idx = rng.integers(0, len(keys), size=(min(1000, B - i0), len(keys)))
+        bs[i0:i0 + len(idx)] = gm[idx].mean(axis=1)
+    q = np.percentile(bs, [2.5, 97.5, 100 * 0.05 / 6, 100 * (1 - 0.05 / 6)])
+    return float(gm.mean()), (float(q[0]), float(q[1])), (float(q[2]), float(q[3])), len(keys)
+
+
+def s11_cells(modality, bucket):
+    lo = np.isin(bucket, ("[0,.2)", "[.2,.5)"))
+    hi = np.isin(bucket, ("[.5,.8)", "[.8,1]"))
+    img = modality == "image"
+    tl = np.isin(modality, TEXTLIKE)
+    return {"all": np.ones(len(modality), bool), "P1": img & lo, "P2": tl & hi, "M1": img & hi, "M2": tl & lo}
+
+
+def f3(x):
+    return f"{x:+.3f}"
+
+
+def ci3(t):
+    return f"{t[0]:+.3f} [{t[1][0]:+.3f}, {t[1][1]:+.3f}]"
+
+
+# ------------------------------------------------------------------ report (27B, 27C)
+def load_npz(path):
+    z = np.load(path, allow_pickle=False)
+    d = {k: z[k] for k in z.files}
+    d["meta"] = json.loads(str(d["meta"]))
+    d["path"] = path
+    return d
+
+
+ENC_ORDER = ("E1", "E2", "E3", "E4")
+
+
+def report(paths):
+    out = []
+    p = out.append
+    sets = [load_npz(x) for x in paths if os.path.exists(x)]
+    zen = [d for d in sets if d["meta"]["set"] not in ("s19", "s24")]          # S11 (t27 in the self-test)
+    bud = {d["meta"]["enc"]: d for d in zen if d["meta"]["kind"] == "budget"}
+    sds = {d["meta"]["enc"]: d for d in zen if d["meta"]["kind"] == "seeds"}
+    gh = [d for d in sets if d["meta"]["set"] in ("s19", "s24")]
+    p("# Session 27, parts B and C: outputs")
+    p("")
+    p("Written by `scripts/s27.py report` from the per-query files " + ", ".join(f"`{os.path.relpath(d['path'], ROOT)}`" for d in sets) +
+      ". Nothing here needs a vector. A set whose gate failed is listed as FAILED with none of its numbers.")
+    p("")
+    p("## Gates")
+    p("")
+    for d in sets:
+        m = d["meta"]
+        g = m["gate"]
+        p(f"- {m['set']} {m['enc']} ({m['kind']}, commit {m['commit']}, {m['seconds']} s, scikit-learn {m['sklearn']}, "
+          f"numpy {m['numpy']}): {'passed' if g['pass'] else 'FAILED'}; {g['queries']} queries; " +
+          "; ".join(f"{c['file']}: " + (", ".join(f"{k} differs on {v}" for k, v in c.get("rows", {}).items()) if not c.get("missing") else "missing")
+                    for c in g["checks"]) + (f"; sib_same differs on {g['sib_same_differ']}" if "sib_same_differ" in g else ""))
+    passed = {e: d for e, d in bud.items() if d["meta"]["gate"]["pass"]}
+    cells_cache = {}
+
+    def cells(d):
+        k = d["path"]
+        if k not in cells_cache:
+            cells_cache[k] = s11_cells(d["modality"], d["bucket"])
+        return cells_cache[k]
+
+    def hits(d, r):
+        return (d[f"rank_{r}"] <= 5).astype(float)
+
+    def r_at(d, r, sel, k=5):
+        return float((d[f"rank_{r}"][sel] <= k).mean())
+
+    def diff(d, x, y, cell):
+        sel = cells(d)[cell]
+        z = hits(d, x)[sel] - hits(d, y)[sel]
+        return boot_ci(z, d["qdirname"][sel], CELL_SEEDS[cell])
+
+    CELLS = ("all", "P1", "P2", "M1", "M2")
+    for e in ENC_ORDER:
+        if e not in bud:
+            continue
+        d = bud[e]
+        p("")
+        p(f"## 27B, {d['meta']['set'].upper()}, {e}")
+        p("")
+        if e not in passed:
+            p("FAILED: the gate did not pass; no number of this set is printed.")
+            continue
+        rows = d["meta"]["rows"]
+        nv = d["meta"]["nvec"]
+        cs = cells(d)
+        p(f"Queries: {len(d['qpath'])} over {len(set(d['qdirname'].tolist()))} folders; {d['meta']['n_ranked']} folders ranked. "
+          "Cells: " + ", ".join(f"{c} {int(cs[c].sum())}" for c in CELLS) + ".")
+        p("")
+        p("### recall@5 and vectors per folder")
+        p("")
+        p("| row | vec/folder | " + " | ".join(CELLS) + " |")
+        p("|---|---:|" + "---:|" * len(CELLS))
+        for r in rows:
+            p(f"| {r} | {nv[r]:.2f} | " + " | ".join(f"{r_at(d, r, cs[c]):.3f}" for c in CELLS) + " |")
+        for k in (1, 10):
+            p("")
+            p(f"### recall@{k}")
+            p("")
+            p("| row | " + " | ".join(CELLS) + " |")
+            p("|---|" + "---:|" * len(CELLS))
+            for r in rows:
+                p(f"| {r} | " + " | ".join(f"{r_at(d, r, cs[c], k):.3f}" for c in CELLS) + " |")
+        for ref in ("d", "L3"):
+            p("")
+            p(f"### x-{ref} in recall@5, paired 95 percent intervals over directories (1,000 resamples, eval.py's cell seeds)")
+            p("")
+            p("| row | " + " | ".join(CELLS) + " |")
+            p("|---|" + "---|" * len(CELLS))
+            for r in rows:
+                if r == ref:
+                    continue
+                p(f"| {r} | " + " | ".join(ci3(diff(d, r, ref, c)) for c in CELLS) + " |")
+        p("")
+        p("### Labelled minus blind at the same number of centroids per folder (Lk-Mk), recall@5")
+        p("")
+        p("| k | space | all | P1 | P2 | M1 | M2 |")
+        p("|---:|---|---|---|---|---|---|")
+        for k in LK:
+            for sfx, name in (("", "uncentered"), ("c", "centered")):
+                x, y = f"L{k}{sfx}", f"M{k}{sfx}"
+                if f"rank_{x}" in d and f"rank_{y}" in d:
+                    p(f"| {k} | {name} | " + " | ".join(ci3(diff(d, x, y, c)) for c in CELLS) + " |")
+
+    # H27d reading
+    p("")
+    p("## Reading H27d: the smallest budget not inferior to d (lower bound of x-d at or above -0.02)")
+    p("")
+    encs = [e for e in ENC_ORDER if e in passed]
+    p(f"Encoders with a passed gate: {', '.join(encs) or 'none'}. A value qualifies under an encoder if the lower bound of "
+      "x-d is at or above -0.02 over all queries and in P1, P2, M1 and M2.")
+    p("")
+    fams = [("L", "labelled, uncentered", LK, ""), ("L", "labelled, centered", LK, "c"), ("B", "blind, uncentered", BK, ""),
+            ("B", "blind, centered", BK, "c"), ("M", "blind at the labelled budget, uncentered", LK, ""),
+            ("M", "blind at the labelled budget, centered", LK, "c")]
+    qual = {}
+    p("| family | " + " | ".join(encs) + " | all four |")
+    p("|---|" + "---|" * len(encs) + "---|")
+    for fam, name, ks, sfx in fams:
+        cols, per = [], {}
+        for e in encs:
+            d = passed[e]
+            okk = []
+            for k in ks:
+                r = f"{fam}{k}{sfx}"
+                if f"rank_{r}" not in d:
+                    continue
+                lbs = {c: diff(d, r, "d", c)[1][0] for c in CELLS}
+                qual[(e, r)] = (all(v >= -0.02 for v in lbs.values()), lbs)
+                if qual[(e, r)][0]:
+                    okk.append(k)
+            per[e] = okk
+            cols.append(f"{min(okk)} ({', '.join(map(str, okk))})" if okk else "none")
+        both = [k for k in ks if all(k in per[e] for e in encs)] if encs else []
+        p(f"| {name} | " + " | ".join(cols) + f" | {min(both) if both else 'none'} |")
+    p("")
+    p("Each cell: the smallest qualifying value, then every qualifying value in brackets. The binding cell of each row "
+      "under each encoder (the cell whose lower bound of x-d is lowest):")
+    p("")
+    for fam, name, ks, sfx in fams:
+        parts = []
+        for e in encs:
+            for k in ks:
+                r = f"{fam}{k}{sfx}"
+                if (e, r) in qual:
+                    lbs = qual[(e, r)][1]
+                    c = min(lbs, key=lbs.get)
+                    parts.append(f"{e} {r} {c} {lbs[c]:+.3f}")
+        p(f"- {name}: " + "; ".join(parts))
+
+    # 27C
+    p("")
+    p("## 27C: the k-means seed (random_state 0, 1, 2), recall@5")
+    p("")
+    for e in ENC_ORDER:
+        if e not in sds:
+            continue
+        d = sds[e]
+        if not d["meta"]["gate"]["pass"]:
+            p(f"- {e}: FAILED, no number printed.")
+            continue
+        cs = cells(d)
+        p(f"### {e}")
+        p("")
+        p("| row | seed | " + " | ".join(f"R@5 {c}" for c in CELLS) + " | " + " | ".join(f"x-a {c}" for c in CELLS) + " |")
+        p("|---|---:|" + "---:|" * len(CELLS) + "---|" * len(CELLS))
+        for base in ("L3", "B2c"):
+            for s in SEEDS27C:
+                r = f"{base}s{s}"
+                p(f"| {base} | {s} | " + " | ".join(f"{r_at(d, r, cs[c]):.3f}" for c in CELLS) + " | " +
+                  " | ".join(ci3(diff(d, r, "a", c)) for c in CELLS) + " |")
+        p("")
+    worst = {}
+    for e, d in sds.items():
+        if not d["meta"]["gate"]["pass"]:
+            continue
+        cs = cells(d)
+        for base in ("L3", "B2c"):
+            for c in CELLS:
+                v = [r_at(d, f"{base}s{s}", cs[c]) for s in SEEDS27C]
+                va = [r_at(d, f"{base}s{s}", cs[c]) - r_at(d, "a", cs[c]) for s in SEEDS27C]
+                worst.setdefault((base, "recall@5"), []).append((max(v) - min(v), e, c))
+                worst.setdefault((base, "minus a"), []).append((max(va) - min(va), e, c))
+    p("Reading H27e: the largest spread across the three seeds (max minus min), over the five cells and the encoders "
+      "with a passed gate:")
+    p("")
+    for (base, what), lst in sorted(worst.items()):
+        m = max(lst)
+        p(f"- {base}, {what}: {m[0]:.4f} ({m[1]}, {m[2]})")
+
+    # G2 secondary
+    for d in gh:
+        m = d["meta"]
+        p("")
+        p(f"## 27B secondary, {m['set'].upper()} under {m['enc']} (owner-weighted, 10,000 resamples of owners)")
+        p("")
+        if not m["gate"]["pass"]:
+            p("FAILED: the gate did not pass; no number of this set is printed.")
+            continue
+        c = s11_cells(d["modality"], d["bucket"])
+        sib = d["sib_same"] >= 1
+        gc = {"all": np.ones(len(sib), bool), "P1s": c["P1"] & sib, "P2s": c["P2"] & sib}
+        rows = m["rows"]
+        p("Cells: " + ", ".join(f"{k} {int(v.sum())} queries, {len(set(d['grp'][v].tolist()))} owners" for k, v in gc.items()) + ".")
+        p("")
+        p("| row | vec/folder | R@5 all | R@5 P1s | R@5 P2s | x-d all | x-d P1s | x-d P2s | x-L3 P1s | x-L3 P2s |")
+        p("|---|---:|---:|---:|---:|---|---|---|---|---|")
+        for r in rows:
+            h = (d[f"rank_{r}"] <= 5).astype(float)
+            hd = (d["rank_d"] <= 5).astype(float)
+            hc = (d["rank_L3"] <= 5).astype(float)
+            lev = [oboot(h[gc[k]], d["grp"][gc[k]], GH_SEEDS[k])[0] for k in ("all", "P1s", "P2s")]
+            dd = [ci3(oboot(h[gc[k]] - hd[gc[k]], d["grp"][gc[k]], GH_SEEDS[k])) if r != "d" else "" for k in ("all", "P1s", "P2s")]
+            dc_ = [ci3(oboot(h[gc[k]] - hc[gc[k]], d["grp"][gc[k]], GH_SEEDS[k])) if r != "L3" else "" for k in ("P1s", "P2s")]
+            p(f"| {r} | {m['nvec'][r]:.2f} | " + " | ".join(f"{x:.3f}" for x in lev) + " | " + " | ".join(dd) + " | " + " | ".join(dc_) + " |")
+    print("\n".join(out))
+    return 0
+
+
+# ------------------------------------------------------------------ 27A: queries written by a person
+HCELLS = ("all", "QI-T", "QT-I", "QI-I", "QT-T")
+HSEEDS = {"all": 2700, "QI-T": 2701, "QT-I": 2702, "QI-I": 2703, "QT-T": 2704}
+HROWS = ("a", "ac", "c", "cc", "d", "dc", "tb2", "tb2c")
+RRF_K = 60
+
+
+def read_queries(path, sample_path):
+    """The exported queries joined to the sample: one dict per query with folder, kind, target path."""
+    sample = {r["key"]: r for r in jl(sample_path)}
+    out = []
+    for q in jl(path):
+        s = sample[q["folder"]]
+        files = {f["key"]: f for f in s["files"]}
+        text = " ".join(str(q["query"]).split())
+        if not text:
+            continue
+        out.append(dict(qid=f"{q['folder']}:{q['kind']}", folder=q["folder"], dir=s["dir"], kind=q["kind"],
+                        target=files[q["target"]]["path"], query=text, writer=q.get("writer", ""),
+                        bucket=s["bucket"], family=s["family"], skipped=len(q.get("skipped", []))))
+    keys = [q["qid"] for q in out]
+    assert len(keys) == len(set(keys)), "a folder holds two queries of one kind"
+    return out
+
+
+def human_embed(args):
+    import embed as em  # noqa: E402
+    qs = read_queries(args.queries, args.sample)
+    enc = em.Encoder(args.model)
+    cut = [enc.truncate(q["query"])[0] for q in qs]
+    t0 = time.time()
+    Q = enc.encode_texts(cut, "query")
+    log(f"{len(qs)} queries embedded in {time.time() - t0:.0f}s with {args.model} ({enc.dtype_name()})")
+    out = os.path.join(args.emb, args.npz_name)
+    np.savez(out, vecs=Q.astype(np.float32), qid=np.array([q["qid"] for q in qs]),
+             query=np.array([q["query"] for q in qs]))
+    log(f"wrote {out}")
+    return 0
+
+
+def name_router(manifest, ok, dir_list, texts):
+    """Session 17's name router for text queries: char_wb 3-4-gram TF-IDF (sublinear tf) of the lowercased
+    base name without its last extension, fitted on the embedded files of the ranked folders; a folder
+    scores the best cosine of the lowercased query against its files' names. Returns (nq, nd) scores."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import normalize
+    ranked = {d: j for j, d in enumerate(dir_list)}
+    files = [i for i, r in enumerate(manifest) if ok[i] and r["dir"] in ranked]
+    files.sort(key=lambda i: (ranked[manifest[i]["dir"]], i))
+    owner = np.array([ranked[manifest[i]["dir"]] for i in files])
+    names = []
+    for i in files:
+        b = os.path.basename(manifest[i]["path"]).lower()
+        k = b.rfind(".")
+        names.append(b[:k] if k > 0 else b)
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 4), sublinear_tf=True)
+    X = normalize(vec.fit_transform(names)).astype(np.float32).tocsr()
+    T = normalize(vec.transform([t.lower() for t in texts])).astype(np.float32).tocsr()
+    nd = len(dir_list)
+    bounds = np.searchsorted(owner, np.arange(nd + 1))
+    nz = bounds[1:] > bounds[:-1]
+    sim = (T @ X.T).toarray()
+    S = np.full((len(texts), nd), -np.inf, np.float32)
+    S[:, nz] = np.maximum.reduceat(sim, bounds[:-1][nz], axis=1)
+    return S
+
+
+def min_rank(S):
+    out = np.empty(S.shape, np.int64)
+    n = S.shape[1]
+    for i in range(S.shape[0]):
+        s = np.sort(S[i])
+        out[i] = 1 + (n - np.searchsorted(s, S[i], side="right"))
+    return out
+
+
+def human_eval(args):
+    manifest = jl(args.manifest)
+    dirs = {r["dir"]: r for r in jl(args.dirs)}
+    index = jl(os.path.join(args.emb, "index.jsonl"))
+    assert [r["path"] for r in index] == [r["path"] for r in manifest], "cache order differs from manifest"
+    ok = np.array([bool(r.get("ok")) for r in index])
+    mods_all = np.array([r["modality"] for r in manifest])
+    dir_of = np.array([r["dir"] for r in manifest])
+    dir_list = sorted(d for d in set(dir_of[ok]) if d in dirs)          # descq.py's candidates
+    pos = {d: i for i, d in enumerate(dir_list)}
+    V = np.load(os.path.join(args.emb, "vectors.npy"))
+    calib, is_img, in_calib, mu, Vc = ev.centered_space(V, ok, mods_all, manifest, dirs, 0.2, args.calib_seed)
+    Vu = ev.unit(V).astype(np.float32)
+    children = {d: np.where((dir_of == d) & ok)[0] for d in dir_list}
+    reps = {}
+    for row in HROWS:
+        space, base, param = ev.parse_rep(row)
+        Xa = Vc if space == "c" else Vu
+        R = {d: ev.build(base, Xa[children[d]], mods_all[children[d]], param) for d in dir_list}
+        blocks = [R[d] for d in dir_list]
+        starts = np.cumsum([0] + [len(b) for b in blocks[:-1]])
+        reps[row] = (np.concatenate(blocks).astype(np.float32), starts, space, float(np.mean([len(b) for b in blocks])))
+    log(f"{args.enc}: {len(dir_list)} candidate folders; representations built")
+
+    def rank_all(Q, Qc):
+        """descq.py's ranking: (ranks of the own folder per row, full score rows per row) for query rows."""
+        return {row: np.maximum.reduceat((Qc if sp == "c" else Q) @ M.T, st, axis=1) for row, (M, st, sp, _) in reps.items()}
+
+    # gate: descq.py's title ranks
+    gate = {}
+    tnpz = os.path.join(args.emb, "descq_s12.npz")
+    if os.path.exists(tnpz):
+        t = np.load(tnpz)
+        Q, qd = t["title_vecs"], list(t["title_dirs"])
+        Qc = ev.unit(Q - mu["txt"]).astype(np.float32)
+        tr = {r: np.zeros(len(qd), np.int64) for r in ("a", "c", "d")}
+        for i0 in range(0, len(qd), 256):
+            S = rank_all(Q[i0:i0 + 256], Qc[i0:i0 + 256])
+            idx = np.array([pos[d] for d in qd[i0:i0 + 256]])
+            for r in tr:
+                tgt = S[r][np.arange(len(idx)), idx]
+                tr[r][i0:i0 + 256] = 1 + (S[r] > tgt[:, None]).sum(axis=1)
+        gate["titles"] = len(qd)
+        if args.check_titles and os.path.exists(args.check_titles):
+            dump = [g for g in jl(args.check_titles) if g["set"] == "title"]
+            want = {g["relevant_dir"]: g for g in dump}
+            for r in tr:
+                gate[f"title_rank_{r}_differ"] = int(sum(1 for k, d in enumerate(qd) if d not in want or want[d][f"rank_{r}"] != tr[r][k]))
+            gate["pass"] = all(v == 0 for k, v in gate.items() if k.endswith("_differ")) and len(dump) == len(qd)
+        elif args.expect_titles:
+            exp = dict(kv.split("=") for kv in args.expect_titles.split(","))
+            got = {r: round(float((tr[r] <= 5).mean()), 3) for r in tr}
+            gate["title_recall5"] = got
+            gate["pass"] = all(abs(got[r] - float(v)) < 1e-9 for r, v in exp.items())
+        else:
+            gate["pass"] = False
+            gate["why"] = "no title ranks to compare with"
+    else:
+        gate["pass"] = False
+        gate["why"] = f"{tnpz} missing"
+    log(f"title gate: {json.dumps(gate)}")
+
+    qs = read_queries(args.queries, args.sample)
+    hz = np.load(os.path.join(args.emb, args.npz_name))
+    assert list(hz["qid"]) == [q["qid"] for q in qs], "embedded queries differ from the export"
+    assert list(hz["query"]) == [q["query"] for q in qs], "embedded query texts differ from the export"
+    Q = hz["vecs"].astype(np.float32)
+    Qc = ev.unit(Q - mu["txt"]).astype(np.float32)
+    own_idx = np.array([pos[q["dir"]] for q in qs])
+    ranks, scores_own = {}, {}
+    S = rank_all(Q, Qc)
+    rr = np.arange(len(qs))
+    for r in HROWS:
+        tgt = S[r][rr, own_idx]
+        ranks[r] = 1 + (S[r] > tgt[:, None]).sum(axis=1)
+    N = name_router(manifest, ok, dir_list, [q["query"] for q in qs])
+    ntgt = N[rr, own_idx]
+    name_rank = 1 + (N > ntgt[:, None]).sum(axis=1)
+    rn = min_rank(N)
+    fused = {}
+    for r in ("a", "c", "d"):
+        Sr = S[r]
+        own_s = Sr[rr, own_idx]
+        f = 1.0 / (RRF_K + min_rank(Sr)) + 1.0 / (RRF_K + rn)
+        fo = f[rr, own_idx][:, None]
+        better = (f > fo) | ((f == fo) & (Sr > own_s[:, None]))
+        better[rr, own_idx] = False
+        fused[r] = 1 + better.sum(axis=1)
+    meta = dict(enc=args.enc, emb=args.emb, n_candidates=len(dir_list), nvec={r: reps[r][3] for r in HROWS}, gate=gate,
+                queries=len(qs), folders=len({q["folder"] for q in qs}), seconds=round(time.time() - T0, 1))
+    out = args.out if os.path.isabs(args.out) else os.path.join(ROOT, args.out)
+    np.savez_compressed(out, meta=np.array(json.dumps(meta)), qid=np.array([q["qid"] for q in qs]),
+                        folder=np.array([q["folder"] for q in qs]), kind=np.array([q["kind"] for q in qs]),
+                        bucket=np.array([q["bucket"] for q in qs]), family=np.array([q["family"] for q in qs]),
+                        writer=np.array([q["writer"] for q in qs]), skipped=np.array([q["skipped"] for q in qs]),
+                        words=np.array([len(q["query"].split()) for q in qs]), name_rank=name_rank,
+                        **{f"rank_{r}": ranks[r] for r in HROWS}, **{f"fused_{r}": fused[r] for r in fused})
+    print(json.dumps(meta))
+    return 0 if gate.get("pass") else 3
+
+
+def human_cells(kind, bucket):
+    lo = np.isin(bucket, ("[0,.2)", "[.2,.5)"))
+    qi = kind == "QI"
+    qt = kind == "QT"
+    return {"all": np.ones(len(kind), bool), "QI-T": qi & lo, "QT-I": qt & ~lo, "QI-I": qi & ~lo, "QT-T": qt & lo}
+
+
+def human_report(paths, min_folders=80):
+    out = []
+    p = out.append
+    sets = {}
+    for x in paths:
+        d = load_npz(x)
+        sets[d["meta"]["enc"]] = d
+    p("# Session 27, part A: the 27A queries, outputs")
+    p("")
+    p("Written by `scripts/s27.py human-report` from " + ", ".join(f"`{os.path.relpath(d['path'], ROOT)}`" for d in sets.values()) +
+      ". Recall@5 of the folder that holds the query's target among every S11 folder; creator-clustered intervals "
+      "(1,000 resamples of first-creator families; at most one folder per family in the sample).")
+    p("")
+    for e in ENC_ORDER:
+        if e not in sets:
+            continue
+        d = sets[e]
+        m = d["meta"]
+        p(f"- {e}: gate {'passed' if m['gate'].get('pass') else 'FAILED'} ({json.dumps(m['gate'])}); {m['queries']} queries from "
+          f"{m['folders']} folders; {m['n_candidates']} candidate folders.")
+    p("")
+    if "E1" not in sets or not sets["E1"]["meta"]["gate"].get("pass"):
+        p("No verdict: the E1 set is missing or its gate failed.")
+        print("\n".join(out))
+        return 0
+    if sets["E1"]["meta"]["folders"] < min_folders:
+        p(f"No verdict: queries for {sets['E1']['meta']['folders']} folders, fewer than the brief's minimum of {min_folders}.")
+        print("\n".join(out))
+        return 0
+
+    def hc(d, r):
+        return (d[f"rank_{r}"] <= 5).astype(float) if r != "names" else (d["name_rank"] <= 5).astype(float)
+
+    def cdiff(d, x, y, cell, prefix_x="rank_", prefix_y="rank_"):
+        c = human_cells(d["kind"], d["bucket"])[cell]
+        hx = (d[prefix_x + x] <= 5).astype(float)[c]
+        hy = (d[prefix_y + y] <= 5).astype(float)[c]
+        return boot_ci(hx - hy, d["family"][c], HSEEDS[cell])
+
+    for e in ENC_ORDER:
+        if e not in sets or not sets[e]["meta"]["gate"].get("pass"):
+            continue
+        d = sets[e]
+        cs = human_cells(d["kind"], d["bucket"])
+        p(f"## {e}")
+        p("")
+        p("Cells: " + ", ".join(f"{c} {int(cs[c].sum())} queries ({len(set(d['family'][cs[c]].tolist()))} families)" for c in HCELLS) + ".")
+        p("")
+        for k in (1, 5, 10):
+            p(f"### recall@{k}")
+            p("")
+            p("| row | vec/folder | " + " | ".join(HCELLS) + " |")
+            p("|---|---:|" + "---:|" * len(HCELLS))
+            for r in HROWS:
+                p(f"| {r} | {d['meta']['nvec'][r]:.2f} | " + " | ".join(f"{(d['rank_' + r][cs[c]] <= k).mean():.3f}" for c in HCELLS) + " |")
+            p(f"| names | | " + " | ".join(f"{(d['name_rank'][cs[c]] <= k).mean():.3f}" for c in HCELLS) + " |")
+            for r in ("a", "c", "d"):
+                p(f"| names+{r} | | " + " | ".join(f"{(d['fused_' + r][cs[c]] <= k).mean():.3f}" for c in HCELLS) + " |")
+            p("")
+        p("### Differences in recall@5, creator-clustered 95 percent intervals (98.33 percent in the second line of a primary)")
+        p("")
+        p("| difference | " + " | ".join(HCELLS) + " |")
+        p("|---|" + "---|" * len(HCELLS))
+        for x, y in (("c", "a"), ("c", "d"), ("ac", "a"), ("tb2c", "c"), ("tb2", "c"), ("d", "c"), ("cc", "c"), ("dc", "d")):
+            p(f"| {x}-{y} | " + " | ".join(ci3(cdiff(d, x, y, c)) for c in HCELLS) + " |")
+        p("| names+c minus names+a | " + " | ".join(ci3(cdiff(d, "c", "a", c, "fused_", "fused_")) for c in HCELLS) + " |")
+        p("")
+        if e == "E1":
+            p("### Verdicts (E1)")
+            p("")
+            verdict = {}
+            for h, cell in (("H27a", "QI-T"), ("H27b", "QT-I")):
+                g = float((d["rank_d"][cs[cell]] <= 5).mean())
+                t = cdiff(d, "c", "a", cell)
+                if g < 0.25:
+                    v = "no verdict (gate: d below 0.25, queries too vague)"
+                else:
+                    v = "survives" if (t[0] >= 0.05 and t[1][0] > 0) else "dead"
+                verdict[h] = v
+                p(f"- Gate {cell}: d recall@5 {g:.3f} ({'holds' if g >= 0.25 else 'fails'}). {h}: c-a in {cell} {ci3(t)} "
+                  f"(98.33 percent [{t[2][0]:+.3f}, {t[2][1]:+.3f}]), {int(cs[cell].sum())} queries, {t[3]} families: {v}.")
+            t = cdiff(d, "c", "d", "all")
+            lo, hi = t[1]
+            v = "not inferior" if lo >= -0.02 else ("inferior" if hi < -0.02 else "inconclusive")
+            verdict["H27c"] = v
+            p(f"- H27c: c-d over all human queries {ci3(t)} (98.33 percent [{t[2][0]:+.3f}, {t[2][1]:+.3f}]): {v}.")
+            full = verdict["H27a"] == "survives" and verdict["H27b"] == "survives"
+            p(f"- Venue rule: {'full-paper track (H27a and H27b both survive)' if full else 'reproducibility or resource track'}.")
+            p("")
+    d = sets["E1"]
+    p("## Queries")
+    p("")
+    for kind in ("QI", "QT"):
+        s = d["kind"] == kind
+        p(f"- {kind}: {int(s.sum())} queries, words median {int(np.median(d['words'][s])) if s.any() else 0} "
+          f"(min {int(d['words'][s].min()) if s.any() else 0}, max {int(d['words'][s].max()) if s.any() else 0}); "
+          f"targets skipped before the written one: {int(d['skipped'][s].sum())}.")
+    writers = sorted(set(d["writer"].tolist()))
+    p(f"- Writers named in the export: {', '.join(repr(w) for w in writers)}.")
+    p("- Queries file: as passed to human-embed; the writer field above says who wrote them.")
+    print("\n".join(out))
+    return 0
+
+
+# ------------------------------------------------------------------ main
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("budget", "seeds"):
+        s = sub.add_parser(name)
+        s.add_argument("--set", required=True, choices=["s11", "s19", "s24", "t27"])
+        s.add_argument("--emb", required=True)
+        s.add_argument("--enc", required=True)
+        s.add_argument("--calib-seed", type=int, required=True)
+        s.add_argument("--check", action="append", help="stored ranks file (repeatable)")
+        s.add_argument("--flags")
+        s.add_argument("--uncentered-only", action="store_true")
+        s.add_argument("--out", required=True)
+        s.add_argument("--procs", type=int, default=4)
+        s.add_argument("--block", type=int, default=512)
+        s.add_argument("--tmp", default=None, help="directory for the centered vectors the workers map")
+    r = sub.add_parser("report")
+    r.add_argument("npz", nargs="+")
+    he = sub.add_parser("human-embed")
+    he.add_argument("--model", required=True)
+    he.add_argument("--emb", required=True)
+    he.add_argument("--queries", required=True)
+    he.add_argument("--sample", default="data/humanq_sample_s11.jsonl")
+    he.add_argument("--npz-name", default="humanq_s27.npz")
+    hv = sub.add_parser("human-eval")
+    hv.add_argument("--enc", required=True)
+    hv.add_argument("--emb", required=True)
+    hv.add_argument("--queries", required=True)
+    hv.add_argument("--sample", default="data/humanq_sample_s11.jsonl")
+    hv.add_argument("--manifest", default="data/manifest_s11.jsonl")
+    hv.add_argument("--dirs", default="data/dirs_s11.jsonl")
+    hv.add_argument("--calib-seed", type=int, default=20261102)
+    hv.add_argument("--check-titles", default=None, help="descq.py rank dump (session 17) for the title gate")
+    hv.add_argument("--expect-titles", default=None, help="a=0.658,c=0.792,d=0.794: recall@5 on titles, if no dump")
+    hv.add_argument("--npz-name", default="humanq_s27.npz")
+    hv.add_argument("--out", required=True)
+    hr = sub.add_parser("human-report")
+    hr.add_argument("npz", nargs="+")
+    hr.add_argument("--min-folders", type=int, default=80)
+    args = ap.parse_args()
+    for k in ("emb", "queries", "sample", "manifest", "dirs"):
+        v = getattr(args, k, None)
+        if v and not os.path.isabs(v):
+            setattr(args, k, os.path.join(ROOT, v))
+    if args.cmd == "budget":
+        sys.exit(score(args, budget_rows(args.uncentered_only)))
+    if args.cmd == "seeds":
+        sys.exit(score(args, seed_rows()))
+    if args.cmd == "report":
+        sys.exit(report(args.npz))
+    if args.cmd == "human-embed":
+        sys.exit(human_embed(args))
+    if args.cmd == "human-eval":
+        sys.exit(human_eval(args))
+    if args.cmd == "human-report":
+        sys.exit(human_report(args.npz, args.min_folders))
+
+
+if __name__ == "__main__":
+    main()

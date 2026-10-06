@@ -1,0 +1,15 @@
+tree 245966c09c7e2a55d7cddd9fc0e4b3c22e4ee449
+parent 8e66d332c30184ab44b94e8ea13b710ad8d70bdd
+author Claude <noreply@anthropic.com> 1791173237 -0400
+committer Claude <noreply@anthropic.com> 1791173237 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQAAB3yBP
+ GsvZDpzg1tqu5V6oumLPlJbvH1S9igNz5XhQgG0fONjQs7xe/T925lqy/M08i3kOBCnpKcs0M7wE
+ pwE=
+ -----END SSH SIGNATURE-----
+
+BRIEF: session 24, a second draw of GitHub directories sized for the owner minimum that session 19 missed (86 and 98 owners of 100), pre-registered after session 19's E1 table and before any number of sessions 21 and 23; session 21's tests also read on the new draw and pooled; session 23 raised to 300 trees
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L3uBXsnxCDj3XA5StyfgGU

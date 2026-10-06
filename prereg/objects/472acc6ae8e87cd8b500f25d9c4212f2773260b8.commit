@@ -1,0 +1,17 @@
+tree 9088515515a0773273ad72ba34c20fa16c61bd42
+parent 568341833c5e32db3dccedabd94e6efa96f11442
+author Claude <noreply@anthropic.com> 1791168337 -0400
+committer Claude <noreply@anthropic.com> 1791168337 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFJMnnt4
+ WECtJmMc/IYgZB9niAdMBQVsGXBj9Qv50cIO4m5iEscTCOZfp6k/rUpwx64aUxSHFh0EuurYCUkT
+ TgI=
+ -----END SSH SIGNATURE-----
+
+BRIEF: session 21, what to store in a fixed number of bytes of folder metadata, pre-registered while the session 19 pod is in its harvest
+
+Three tests under E1 on the new source at 2 KiB, on queries whose folder is not stored whole: a sample of files' own vectors at one bit against the pooled mean in its best format (H21a), against k-means centroids (H21b), and against a sample that ignores the kinds (H21c); every policy at five budgets on both sources reported beside them. scripts/budget.py (the policies, the reproduction check of eval.py's a and d ranks, owner-weighted tests, near-tie bounds), scripts/s21_selftest.py (a second, plain implementation: 59,850 ranks agree on a synthetic set with files and folders without vectors), scripts/s19_followup.sh (run by the session 19 driver after its outputs are pushed). Read before the commit by a reviewer instance that had not seen the code; its findings are listed in the brief. No file of the new source has been embedded and no retrieval number of it exists. scripts/s19_selftest.py only gains S19_KEEP.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L3uBXsnxCDj3XA5StyfgGU

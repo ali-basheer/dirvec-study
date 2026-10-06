@@ -1,0 +1,21 @@
+tree 32aab66e4c48e98a44de9ff1a582fba0496b14e6
+parent 7600c7766f741e136e5c01d54110198011fa7ab0
+author Claude <noreply@anthropic.com> 1791235167 -0400
+committer Claude <noreply@anthropic.com> 1791235167 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIBjLjiV
+ YkJNALfnNJ+X6JBq6zKlhm2/rsc8Ko7KheUdMh7oG4ebN4c1IUtSG/ONHAXOaZ/DrGJOhemAnEoy
+ igc=
+ -----END SSH SIGNATURE-----
+
+session 27 brief: queries written by a person (27A), the budget from one to eight vectors (27B), the k-means seed (27C)
+
+Registered before any number of it exists and before any query is written: the 27A sample rule, the
+tool, the scoring, the gate, H27a to H27c and the rule that decides the SIGIR track; the 27B rows (Lk,
+BK, Mk, each centered and uncentered) with the H27d reading; the 27C seeds with the H27e reading; gates
+on every stored eval.py rank. scripts/s27.py, humanq_tool.py and the drivers passed
+scripts/s27_selftest.py on a synthetic set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XgSYkhgAuaKciibnZZLb5Q

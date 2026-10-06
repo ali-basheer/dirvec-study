@@ -1,0 +1,17 @@
+tree 91bc458582490a56422d5c52598836d988430e0e
+parent 889df59458d190b2f28d6ec76d4f807723a13720
+author Claude <noreply@anthropic.com> 1791170677 -0400
+committer Claude <noreply@anthropic.com> 1791170677 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMy9yRFW
+ asZJ1BDBtyihWu2d26tae5Y/jqT1br8GhddgChfomQ5OlHjDGLouAVHdD9446/KcXGF/BmQp4f+g
+ 9w0=
+ -----END SSH SIGNATURE-----
+
+BRIEF: session 23, a walk down whole repository trees guided by folder summaries, pre-registered while the session 19 pod is embedding
+
+Whole repositories of session 19's pool (seed 20261106; at least 8 directories with a kept file, depth 2, 40 to 300 kept files, 5 images and 5 others; 200 trees or 22,000 files). Every directory has a summary of its own files and one of its subtree; a greedy reader walks from the root to the query's directory. Three tests under E1 at 2 KiB: the per-kind sample that merges against the mean on minority queries (H23a), against the uniform sample (H23b), and the walk against reading every directory (H23c); names and chance beside them. scripts/tree_fetch.py, scripts/tree.py, scripts/s23_selftest.py (a second, plain implementation: 32,945 values agree on synthetic trees), scripts/s23_run.sh, and the call at the end of scripts/s19_followup.sh (the session 21 part of that script is unchanged). Read before the commit by a reviewer instance that had not seen the code; its findings are listed in the brief. No retrieval number of the new source exists yet.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L3uBXsnxCDj3XA5StyfgGU

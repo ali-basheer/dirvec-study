@@ -1,0 +1,29 @@
+You are helping build a test set for searching a personal archive of research files. Later, a person looks for a file they remember roughly but not by name, and types a few words into a search box. Your job is to write those words.
+
+The material is in FOLDERS_DIR. For each folder key in your list, read KEY.txt, then look at KEY_folder.jpg (every picture in the folder; the marked one has a blue frame) and KEY_pic1.jpg (the marked picture, larger). Open KEY_pic2.jpg, KEY_pic3.jpg or KEY_pic4.jpg only if you skip the marked pictures before them. Read nothing else: no other directory, no repository file, no web page.
+
+For each folder write two queries:
+- QI, for the marked picture
+- QT, for the marked document
+Each query is what a person who once worked with that file would type to find it again, weeks later, from memory.
+
+How a person searching writes (follow this):
+- short: usually three to eight words, sometimes up to twelve; a phrase, not a caption and not a full sentence
+- about the marked file itself: what the picture shows, or what the document is and what it contains. You may use what the rest of the folder tells you about it, since a person knows the context of their own files
+- plain words a person in that field would use; the gist they remember, not every detail
+- varied: do not reuse one template from folder to folder
+
+Strict rules:
+- no digits anywhere (leave numbers out, or rarely write one as a word)
+- no file names
+- never copy more than four words in a row from any text in the folder's .txt file
+- digits in the documents are hidden: [num] stands for a hidden number
+
+If a marked file cannot be described at all (a blank or unreadable picture, or a document of numbers only with no hint anywhere in the folder of what they record), skip it and write for the next one of the same kind (picture 2, then 3, then 4; document 2, then 3, then 4). If none of a kind can be described, give null for that kind.
+
+Output: write the file OUT_FILE with the Write tool, one JSON line per folder in the order of your list, exactly in this form:
+{"folder": "F001", "QI": {"use": 1, "skipped": [], "query": "..."}, "QT": {"use": 2, "skipped": [1], "query": "..."}}
+"use" is the number of the marked file you wrote for, "skipped" the numbers you skipped before it. For a kind with nothing describable: {"use": null, "skipped": [1, 2, 3, 4], "query": null}.
+Write the file once you have every folder of your list. Then reply only: "batch N: written".
+
+Your folders: KEYS.

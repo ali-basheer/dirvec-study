@@ -1,0 +1,17 @@
+tree 44d342537b4caa24faeec3725a57aeff9d9e5431
+parent d2142b9e9001a0bfe232a0046f65057971b0d4b9
+author Claude <noreply@anthropic.com> 1791164394 -0400
+committer Claude <noreply@anthropic.com> 1791164394 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEEoTgPp
+ 7N5/d/h0wQWA6v0S1KA86/10ijCVU9Iqid34zsfpv3iVqcrH65jbiCtJFhq5Xx4712mRX+BL6Hc8
+ RgQ=
+ -----END SSH SIGNATURE-----
+
+session 19: the harvest and the driver hardened before the run, and a preflight for the pod
+
+Read before the first repository is listed. fetch_gh.py: the file budget is reached when no eligible directory can still fit (a budget one or two files short would have kept the harvest reading the whole pool); longer waits on a rate limit and on a throttled tarball; an unreadable tarball or an incomplete extraction is logged and skipped instead of stopping the harvest; history is fetched without credentials or prompts. s19_run.sh: stop when more than 10 percent of the tarballs fail; check the files on the disk before embedding and rebuild the corpus by commit id if a stop wiped it; run a registered follow-up after the outputs are pushed. s19_preflight.sh: tools, the self-test in the pod's Python and the real endpoints on a throwaway draw (seed 7, suffix _p19), no retrieval number. BRIEF.md lists the amendments; no definition, cell, test or reading changes. scripts/s19_selftest.py passes on the patched code.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L3uBXsnxCDj3XA5StyfgGU

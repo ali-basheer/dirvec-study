@@ -1,0 +1,18 @@
+tree 95b0a73a1759a552739c745f2a3d33636801d902
+parent 839b2c8d237413ee9d0703de7541ed0d29dac406
+author Claude <noreply@anthropic.com> 1791158905 -0400
+committer Claude <noreply@anthropic.com> 1791158905 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHv4TmQq
+ vT6i1xQNSHzv2XSs1BvpumbGtxa5IlXgtjbg1tZ9H4embZqxsnFo9TpmJgg7jpWR2/294CRPeph6
+ igA=
+ -----END SSH SIGNATURE-----
+
+BRIEF: session 19, the minority-modality loss on directories of GitHub repositories, pre-registered before any repository is listed
+
+Primary family of three tests under E1 (c minus a in the minority cells that keep a same-modality sibling; c minus d where c is a strict subset), owner-weighted with 10,000 owner resamples and Bonferroni intervals, a smallest effect of +0.05 and a minimum of 100 owners. scripts/fetch_gh.py (pool by random days, harvest by tarball, rebuild by commit, commit history), scripts/s19.py (corpus counts, the registered tests, commit-subject queries), scripts/s19_run.sh (the pod driver), scripts/s19_selftest.py (the whole pipeline on synthetic repositories behind a local stand-in for the API: passes). eval.py gains the row cs (square-root budget); a, c and d are unchanged rank for rank with or without it (checked by the self-test). manifest.py gains --dir-prefix. reports/panel_2026-10-04.md: the three blind reviews of the SIGIR version and the second round on the plan.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01395xLkDo8qyNmjdzvMvEMY

@@ -1,0 +1,19 @@
+tree 16981eaccc22e8f0a48607031d96569560e2327c
+parent 53d3bfb9b197026b018a80494e7045cf832d8b5e
+author Claude <noreply@anthropic.com> 1791177105 -0400
+committer Claude <noreply@anthropic.com> 1791177105 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIrDx+IJ
+ r5095sA3AVSADulZb+xMhaAugCSVYGnyrez6vCyBCyb7NWrHAa5ghw8E+sY8E9Dd6/IrHaXKvzMr
+ PgU=
+ -----END SSH SIGNATURE-----
+
+session 24: scripts/pool.py, the pooled estimates over both draws, committed before the second draw is embedded
+
+Step 1 recomputes, for each draw alone, every row it pools from the per-query files the pod pushes and compares each line with the line s19.py or budget.py printed, character for character; one difference stops it before any pooled number. On S19 all fourteen lines are reproduced (H19a, H19b, H19c, the no-code and all-of-P1/P2 rows, cs - d, H19d, H21a, H21b, H21c). Step 2 pools: queries of both draws in a test's cell, owner-weighted mean, an owner in both draws counted once, 10,000 owner resamples, seeds 24101 and up. Checked on a copy of S19 posing as the second draw: every pooled point and owner count equals the single draw's.
+
+data/notok_code_s19_e1.txt: the two code files of S19 that E1 did not embed (from the cache index on the pod), so that a no-code folder is the one s19.py counted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PcYHdzobf89qVEK2AU8bo7

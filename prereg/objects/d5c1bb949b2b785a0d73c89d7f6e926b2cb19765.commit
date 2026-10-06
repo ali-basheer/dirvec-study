@@ -1,0 +1,21 @@
+tree dfbd8a086c832389ff11bcfa7b733857aff31e57
+parent 52cd30c8146706b840c6c106bbc06a65dbd6ba6b
+author Claude <noreply@anthropic.com> 1791239999 -0400
+committer Claude <noreply@anthropic.com> 1791239999 -0400
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgrLzsfFISF4by8Q+FKz27YpkK1USsBB+m
+ amu1QkJnbDsAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKORPMI1
+ iQJtPnGYmokZpUV986obfsOS0QhCpVeSNXbOBRaNBGcJkpaaDui0Tktsx5nMihafX69NEakzP90M
+ Ow4=
+ -----END SSH SIGNATURE-----
+
+session 27 amendment: the 27A queries are written by a model as a simulated searcher (data/simq_s11.jsonl), before any is scored
+
+No person wrote queries: the author stopped at the first folder, whose documents were unreadable with every
+digit hidden, and asked for synthetic queries. Six blind subagents (Claude Opus 5.5) wrote two queries for
+each of 100 folders from what the tool shows (the subagent for F061 to F080 was refused by an automated
+check before it ran). The prompt is data/simq_s11_prompt.txt. Scoring, gates, H27a to H27c and the track
+rule stand as registered; the paper reports these as model-written queries.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XgSYkhgAuaKciibnZZLb5Q

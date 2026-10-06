@@ -1,0 +1,2 @@
+data/corpus_s19/gh_384582549_0/init__.py
+data/corpus_s19/gh_76832423_1/hash.js

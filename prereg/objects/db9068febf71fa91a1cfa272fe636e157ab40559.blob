@@ -1,0 +1,1938 @@
+# dirvec, session 1: corpus + ground truth
+
+Working name: dirvec (directory-level semantic representations for heterogeneous file trees). Rename freely.
+
+## Claim under test
+Directory representations built by pooling child embeddings collapse toward the dominant modality (text) and lose image-heavy children. Per-modality representatives (centroids, or k cluster reps per modality) do not. Measured at directory granularity on a real mixed-media tree.
+
+Nothing published tests this at container level. RAPTOR / adRAP / EraRAG: text-only, chunked corpora, hierarchy is text summarization. ColPali, ColNomic, Cohere Embed 4, voyage-multimodal, MMDocIR: page or document level, no aggregation above the document. VectorVFS: vectors in file xattrs, no container layer, search walks the whole tree. "Directory-Aware Query and Maintenance in Vector Databases": directories as path filters, not semantic objects. Re-verify every one of these before citing.
+
+## Session 1 goal
+Corpus chosen and downloaded, manifest built, ground-truth builder written and run. No embeddings, no encoder choice, no retrieval code, no paper text. No GPU needed.
+
+## Corpus requirements
+- Real tree, not synthetic. Directories that mix photos, scanned PDFs, text PDFs, text, spreadsheets.
+- Target: 2k to 5k files, >= 300 directories with >= 3 files each, image fraction spread across directories.
+- Redistributable. Record source URL and licence per file. Case files are the right shape and the wrong licence; use public records.
+- Candidates, in order:
+  1. NTSB investigation dockets. Per-case folders: photos, factual reports, PDFs, spreadsheets. NTSB's own material is not subject to US copyright (17 USC 105); third-party submissions inside a docket may be, so note provenance per file.
+  2. EPA Superfund site document repositories. PDF-heavy, some photos and maps.
+  3. Any open-government release with per-case folders.
+- Check terms before bulk download. Rate-limit. Store only what the study needs.
+
+## Manifest
+`data/manifest.jsonl`, one row per file: path, dir, modality, bytes, sha256, pages (PDF only), source_url, licence_note.
+modality in {image, pdf_text, pdf_scanned, text, table, other}. PDF split: pdftotext chars per page below threshold (start at 50) => pdf_scanned.
+`data/dirs.jsonl`, one row per directory: n_files, count per modality, image_frac, pdf_scanned_frac, depth.
+
+## Ground truth (structural, leave-one-out)
+For each file f in directory D with n(D) >= 3: query = f, relevant = {D}. The directory representation scored against that query must be built excluding f. Metric later: directory-stage recall@k, k in {1, 3, 5, 10}, reported per image_frac bucket [0,.2) [.2,.5) [.5,.8) [.8,1].
+
+Dedupe first: exact by sha256; near-dup by perceptual hash (images) and simhash (text). When a near-dup sits outside f's directory, drop it. Without this, leave-one-out leaks.
+
+Output: `data/gt_structural.jsonl` (query_path, relevant_dir, modality, image_frac_bucket).
+Synthetic natural-language queries (LLM-generated per file) are session 2, if at all.
+
+## Kill criterion
+Stop and report if no candidate yields >= 200 qualifying directories with >= 40 per image_frac bucket. Corpus dies here for free.
+
+## Deliverables
+- `data/manifest.jsonl`, `data/dirs.jsonl`, `data/gt_structural.jsonl`
+- `scripts/fetch.py`, `scripts/manifest.py`, `scripts/build_gt.py`
+- `NOTES.md`: source, licence, counts per bucket, dedupe stats, go/no-go, open problems.
+- Append to this file the exact prompt for session 2.
+
+## Rules
+- Ask Ali only at walls: credentials, terms that need a human click, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes anywhere in the repo.
+
+## Later sessions, context only
+One unified multimodal encoder for all files, so modality is not confounded by model choice. Two-stage retrieval: rank directories, then files inside the top directories. Ablation: pooled centroid vs per-modality centroids vs per-modality k-reps. Storage (xattrs, shadow index file per directory, overlay that ignores directory boundaries) is engineering, not the claim.
+---
+
+# dirvec, session 2: encoder + first number
+
+Session 1 delivered the corpus and the ground truth (see NOTES.md). This session produces the first measurement of the claim. No paper text. No storage engineering. No synthetic queries.
+
+## Inputs
+- Repo at HEAD: `data/manifest.jsonl`, `data/dirs.jsonl`, `data/gt_structural.jsonl`, `data/selection.jsonl`.
+- The corpus itself is not committed. Rebuild it with `python scripts/fetch.py download` (about 5 GB, about 45 min at Zenodo guest rate, resumable). Then `python scripts/manifest.py` must reproduce `data/manifest.jsonl` byte for byte (same sha256 per file). If it does not, stop and report which files differ.
+
+## Session 2 goal
+One unified multimodal encoder, chosen by a short pilot. Every file embedded once and cached. Three directory representations plus one file-level baseline. Leave-one-out directory-stage recall@k per image_frac bucket and per query modality. Result table in the repo. NOTES.md updated with the encoder choice and the numbers.
+
+## Encoder
+- Candidates, in order: jina-embeddings-v4 (single-vector mode), nomic-embed-multimodal-3b. Both open weights, both take text and images into one space. Record model id, revision, dtype and hardware in NOTES.md.
+- Pilot before committing: embed 20 directories (all their files). Sanity check: for each text or table file, rank its own directory's images against all images in the pilot by cosine; report median rank vs random. If neither model beats random clearly, stop and report.
+- One input rule per modality label, fixed for the whole study: image -> the image; text, table -> extracted text, first 2000 tokens; pdf_text -> pdftotext output, first 2000 tokens; pdf_scanned -> page renders at 100 dpi, first 8 pages, mean of page vectors; other (office docs) -> converted text via pandoc or python-docx, else skipped and counted.
+- One vector per file. Cache to `data/emb/<model>/vectors.npy` in manifest order plus `data/emb/<model>/index.jsonl` (path, modality, ok flag). Never re-embed a cached file.
+- Hardware: a GPU with at least 12 GB. If the machine has none, say so before starting; the fallback is a rented GPU (RunPod, Lambda, Colab Pro), not a smaller model.
+
+## Directory representations (the ablation)
+For directory D with children C(D), all built excluding the query file:
+- a. pooled centroid: mean of child vectors, one vector.
+- b. per-modality centroids: mean per modality present in D, up to 6 vectors.
+- c. per-modality k-reps: k-means per modality with k = min(3, n_m), up to 18 vectors.
+- d. file-level max (baseline, no container layer): every child vector kept; this is the VectorVFS-style walk of the whole tree.
+Score(query, D) = max cosine over D's representative vectors. Rank all directories with n(D) >= 3. Leave-one-out means the query file is removed from its own directory before building a, b, c, d for that query.
+
+## Metrics
+- recall@k, k in {1, 3, 5, 10}, per image_frac bucket [0,.2) [.2,.5) [.5,.8) [.8,1] and per query modality, for each of a, b, c, d.
+- Bootstrap over directories (1000 resamples) for the 95 percent interval of recall@5 per bucket.
+- Report the number of queries and directories behind every cell.
+
+## Kill criterion
+The claim is that a loses image queries in the high image_frac buckets and b or c do not. If b and c do not beat a on image queries in [.5,.8) and [.8,1] by more than the bootstrap interval, the claim is dead. Report it plainly either way.
+
+## Deliverables
+- `scripts/embed.py`, `scripts/eval.py`
+- `data/emb/<model>/` (gitignored; the cache is rebuildable from the corpus)
+- `results/session2.md`: the table, the pilot numbers, the encoder choice
+- NOTES.md: encoder section and results section appended
+- Append to this file the exact prompt for session 3.
+
+## Rules
+- Ask only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes anywhere in the repo.
+---
+
+# dirvec, session 3: pre-registered retest on fresh directories
+
+Session 2 killed the claim as stated (see `results/session2.md`, NOTES.md session 2). On image
+queries in the image-heavy buckets the pooled centroid was not beaten. The same table showed a
+different pattern, found after the fact: the pooled centroid loses the minority modality of each
+directory (image queries in text-heavy directories, text queries in image-heavy ones), and the
+file-level baseline d was never beaten. This session tests the post hoc pattern on directories it
+was not found on, with the hypothesis and kill criterion fixed before any number is computed.
+No paper text. No storage engineering. No synthetic queries. No new encoder.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H: a pooled centroid (a) loses queries whose modality is the minority in their directory;
+per-modality k-reps (c) recover them.
+Primary cells, recall@5, leave-one-out, same method as session 2:
+  1. image queries in [0,.2) and [.2,.5) directories
+  2. text-like queries (text, table, pdf_text, other) in [.5,.8) and [.8,1] directories
+Kill: if the paired 95% bootstrap interval (1000 resamples over directories) of c - a does not
+exclude zero in both pooled primary cells, H is dead. Report it plainly either way.
+Secondary, reported, no kill: b - a in the same cells; d - c everywhere; vectors per directory
+for a, b, c, d.
+
+## Steps, in order
+1. Fresh directories. Extend `scripts/fetch.py select` with an option to exclude records
+   already in `data/selection.jsonl` and to write a second selection file
+   (`data/selection_s3.jsonl`, seed 20261001, 100 per bucket from `data/pool.jsonl.gz`).
+   Download into `data/corpus_s3/`. Same caps, same licences, same provenance fields.
+   Throughput in session 2 was about 35 files/min from Zenodo; budget about 2 hours.
+2. Manifest, dirs and ground truth for the new set: `manifest.py` and `build_gt.py` with an
+   option for corpus and output paths (`data/manifest_s3.jsonl`, `data/dirs_s3.jsonl`,
+   `data/gt_structural_s3.jsonl`). Before running, fix two session 2 findings in both scripts:
+   `phash_file` must use the `embed.load_rgb` decode path (35 images were never
+   dedupe-checked in session 1), and `note` must not contain absolute paths. Rerun session 1's
+   `build_gt.py` too and report how many session 1 queries change; do not rewrite the
+   session 2 results.
+3. Kill criterion for the corpus, as in session 1: >= 40 directories per bucket, and at least
+   150 queries in each pooled primary cell. If not met, stop and report.
+4. Embed with `scripts/embed.py all --model jina-embeddings-v4 --text-mode query` into
+   `data/emb/jina-embeddings-v4_s3/` (or teach it a manifest path). Same revision, same input
+   rules, same venv (transformers 4.52.4, peft 0.15.2).
+5. `scripts/eval.py` with a manifest option and the two primary cells as their own rows plus
+   the paired c - a and b - a intervals. Rank only the new directories.
+6. `results/session3.md`: the hypothesis block copied verbatim, the primary cells, the
+   secondary table, the verdict. NOTES.md session 3 section. Append the session 4 prompt here.
+
+## Inputs
+- Repo at HEAD. Session 1 corpus rebuilt with `python scripts/fetch.py download --workers 20`.
+- Model weights: `jinaai/jina-embeddings-v4` revision 853c867b65b749f3c3c72a06868140d842e04f06,
+  public, no login. Qwen Research License: research use only.
+- GPU with at least 12 GB. If the machine has none, say so before starting.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Session 1 data holds 17 em dashes inside verbatim
+  Zenodo file keys and titles (NOTES.md session 2, open problem 5); leave them unless Ali decides.
+---
+
+# dirvec, session 4: cost axis
+
+Session 3 confirmed on fresh directories (pre-registered) that pooled centroids lose the
+minority modality of a directory and per-modality reps (b, c) recover it (see
+`results/session3.md`, NOTES.md session 3). The file-level baseline d is still not beaten.
+This session asks whether the container layer buys anything over the flat walk once cost counts.
+No paper text. No new encoder. No synthetic queries.
+
+## Steps, in order
+1. Fix the 16 .xls files that are tab-separated text: read them as text when xlrd fails. Record
+   the rule change; re-embed only those files; report whether any session 3 number moves.
+2. Two-stage retrieval on both sets (session 1 and session 3): rank directories with a, b, c,
+   keep the top k in {1, 3, 5, 10}, then rank files inside them; compare end-to-end file recall
+   and vectors scored per query against the flat walk d.
+3. Report index size (vectors per directory) and query time for a, b, c, d on both sets.
+4. `results/session4.md`, NOTES.md session 4 section, session 5 prompt appended here.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Set HF_HOME=/workspace/hf and HF_HUB_OFFLINE=1 before embedding.
+---
+
+# dirvec, session 5: scale
+
+Session 4 put a cost axis on the ablation (see `results/session4.md`, NOTES.md session 4). On 400
+directories, two-stage retrieval with per-modality k-reps (c, k = 10) comes within 0.002 of the flat
+walk d on file recall while scoring half the vectors; nothing beats d; a two-stage index is larger
+than the flat one. At 400 directories every method answers in under 1 ms, so the cost argument is
+untested where it would matter. This session repeats the comparison on every remaining eligible
+directory of the pool, with an approximate index as the flat baseline.
+No paper text. No new encoder. No synthetic queries.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H5: on the large set, two-stage retrieval with c and k = 10 loses no more than 0.01 hit@10 against
+the exact flat walk d, and scores at most half the vectors.
+Kill: if the paired 95% bootstrap interval (1000 resamples over directories) of hit@10, two-stage
+c at k = 10 minus exact d, lies entirely below -0.01 over all queries, H5 is dead. Report it
+plainly either way.
+Secondary, reported, no kill: the same for a and b; the session 3 primary cells (c - a, recall@5)
+on the large set; an approximate flat baseline (HNSW over all file vectors) with its recall
+against exact d, its index size and its query time; two-stage with an HNSW over the
+representatives as stage 1.
+
+## Steps, in order
+1. Selection: `scripts/fetch.py select` with `--exclude data/selection.jsonl --exclude
+   data/selection_s3.jsonl`, all remaining eligible records of `data/pool.jsonl.gz`, no cap per
+   bucket (about 2,800 records expected; add the option if `--per-bucket` cannot express it),
+   written to `data/selection_s5.jsonl`. Same eligibility, caps and licences. Report the counts
+   per bucket; the set is not balanced and the tables must say so.
+2. Download into `data/corpus_s5/`. Budget: about 34,000 files at Zenodo's guest limit of about
+   133 files/min is more than 4 hours. Start it first and as one job.
+3. Manifest, dirs and ground truth (`manifest_s5.jsonl`, `dirs_s5.jsonl`, `gt_structural_s5.jsonl`).
+4. Embed with `scripts/embed.py all --manifest data/manifest_s5.jsonl --tag _s5`, new .xls rule.
+   Before the run, make `embed.py` write its cache every 1,000 files, so a crash late in the pass
+   does not lose it. One embedding job on the GPU at a time. Budget about 4 hours.
+5. `scripts/twostage.py` on the large set. If the per-query leave-one-out k-means is too slow at
+   this size, sample 5,000 queries with a fixed seed, stratified by bucket, and say so.
+6. HNSW baselines (hnswlib or faiss, record version and parameters): over the file vectors (flat)
+   and over the representatives (stage 1). Recall against exact search, index bytes, query time,
+   one thread.
+7. `results/session5.md`: the hypothesis block copied verbatim, the tables, the verdict. NOTES.md
+   session 5 section. Append the session 6 prompt here.
+
+## Inputs
+- Repo at HEAD. The session 1 and session 3 sets are not needed unless a number is to be compared
+  on them; if so, rebuild as in NOTES.md session 4.
+- venv and weights as in NOTES.md session 4 (set HF_HUB_ENABLE_HF_TRANSFER=0 for the download,
+  then HF_HOME=/workspace/hf and HF_HUB_OFFLINE=1).
+- GPU with at least 12 GB, about 30 GB of disk, and a pod that lives at least 10 hours.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+
+---
+
+# dirvec, session 6: a representative budget
+
+Session 5 ran the comparison on all 2,808 remaining directories of the pool (see
+`results/session5.md`, NOTES.md session 5). H5 was not killed: two-stage with c at k = 10 is within
+0.001 hit@10 of the exact flat walk d. Its cost clause failed: c scores 0.55 of the vectors, because
+c keeps up to 3 k-means representatives per modality group whatever the group's size, and the large
+set has 9.70 files per directory. Against flat HNSW the container layer bought no speed, only a few
+thousandths of hit@10 at similar query time, for 53 percent more storage.
+This session asks whether a representative budget that scales with directory size keeps c's recall
+at a real saving. Same set, same cache; no download and no GPU needed.
+No paper text. No new encoder. No synthetic queries.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H6: on the session 5 set, c4, per-modality k-means with k = min(3, ceil(n_m / 4)) representatives
+for a modality group of n_m embedded files (unit-normalised centroids, otherwise as c), used as
+stage 1 of two-stage retrieval at k = 10, loses no more than 0.01 hit@10 against the exact flat walk
+d over all queries and scores at most 0.35 of the vectors.
+Kill: H6 is dead if the paired 95% bootstrap interval (1000 resamples over directories) of hit@10,
+c4 at k = 10 minus exact d, over all queries lies entirely below -0.01, or if the mean share of
+vectors scored per query by c4 at k = 10 is above 0.35. Report it plainly either way.
+Secondary, reported, no kill: c2 (k = min(2, n_m)) the same way; c4 and c2 in the session 3 primary
+cells (recall@5, c4 - a and c2 - a); c4 and c2 with HNSW over the representatives as stage 1,
+against flat HNSW at the nearest query time.
+
+## Steps, in order
+1. Add c4 and c2 to `scripts/eval.py` `build()` and to the stage 1 lists of `scripts/twostage.py`
+   and `scripts/hnsw.py`. Leave a, b, c and d unchanged. Check that a, b, c and d reproduce
+   `results/session5.md` before reading any c4 or c2 number.
+2. `eval.py --criterion s3`, `twostage.py --timing --timing-queries 2000` and `hnsw.py` on the
+   session 5 set (`--emb jina-embeddings-v4_s5 --manifest data/manifest_s5.jsonl --dirs
+   data/dirs_s5.jsonl --gt data/gt_structural_s5.jsonl`). Timing runs alone on the CPU.
+3. `results/session6.md`: the hypothesis block copied verbatim, the tables, the verdict. NOTES.md
+   session 6 section. Append the session 7 prompt here.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: `data/corpus_s5/` and the cache
+  `data/emb/jina-embeddings-v4_s5/` (27,545 rows, gitignored), venv `/workspace/venv`.
+- If the volume is gone: rebuild as in NOTES.md sessions 4 and 5 (download about 29 GB, 3 to 4
+  hours from Zenodo; embedding about 1.7 hours on a full RTX PRO 6000, 7 hours on a MIG 1g.24gb
+  slice). Record 22672636 is restricted on Zenodo and is not part of the set.
+- CPU only otherwise. On a pod whose cgroup allows fewer CPUs than `nproc` reports, set
+  `DIRVEC_THREADS`, `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` to the allowed count.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+
+---
+
+# dirvec, session 7: the container layer against flat HNSW at matched time
+
+Session 6 (see `results/session6.md`, NOTES.md session 6) killed H6 on its cost clause: c4, a
+representative budget that scales with group size, scores 0.355 of the vectors at k = 10 (limit
+0.35) and loses 0.007 hit@10 against exact d, most of it in the minority-modality cells. Against
+flat HNSW neither c4 nor c2 buys anything. The one place the container layer still looked useful is
+session 5's HNSW over c as stage 1: 0.003 hit@10 closer to exact d than flat HNSW at about the same
+query time, a gap no interval has tested, and smaller than the 0.002 by which multi-thread HNSW
+builds move between runs. This session tests that gap with a deterministic build and a paired
+interval. Same set, same cache; no download and no GPU needed.
+No paper text. No new encoder. No new representation. No synthetic queries.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H7: on the session 5 set, two-stage retrieval with HNSW over the c representatives as stage 1
+(ef_search 100, 100 representatives, exact stage 2 over the top 10 directories) has higher hit@10
+over all queries than flat HNSW over the file vectors at the matched setting: the smallest
+ef_search in {32, 48, 64, 96, 128, 192, 256} whose measured query time in the same run is at least
+the two-stage query time.
+Kill: H7 is dead if the paired 95% bootstrap interval (1000 resamples over directories) of hit@10,
+two-stage HNSW c minus matched flat HNSW, over all queries, does not lie entirely above zero.
+Report it plainly either way.
+Secondary, reported, no kill: the same for c4 and c2 as stage 1; the same comparison in the
+session 3 primary cells P1 and P2; hit@1; storage of each against flat HNSW.
+
+## Steps, in order
+1. `scripts/hnsw.py`: a `--build-threads` option (default: as now) and the flat ef_search grid
+   above; write per-query hit@1 and hit@10 of every flat and two-stage setting to
+   `data/emb/<emb>/hnsw.jsonl`. Leave M, ef_construction, seed, K_REPS and stage 2 unchanged.
+   With `--build-threads 1`, run twice and check that the two per-query files are identical, and
+   that exact d and the exact two-stage directory lists still match `twostage.py`.
+2. The paired comparison (in `hnsw.py` or a small script reading `hnsw.jsonl`): matched setting as
+   defined in H7, interval as in H7, for c, c4 and c2, all queries and P1, P2. Timing alone on the
+   CPU, one thread, `--timing-queries 2000` as before.
+3. `results/session7.md`: the hypothesis block copied verbatim, the tables, the verdict. NOTES.md
+   session 7 section. Append the session 8 prompt here.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: `data/corpus_s5/` and the cache
+  `data/emb/jina-embeddings-v4_s5/` (27,545 rows, gitignored), venv `/workspace/venv`. Run
+  `twostage.py` once first if `twostage.jsonl` is missing (hnsw.py reads it).
+- If the volume is gone: rebuild as in NOTES.md sessions 4 and 5.
+- CPU only. On a pod whose cgroup allows fewer CPUs than `nproc` reports, set `DIRVEC_THREADS`,
+  `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` to the allowed count.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+
+---
+
+# dirvec, session 8: the modality gap at folder level
+
+This section replaces the seed-robustness brief drafted at the end of session 7. That brief could
+not change the systems conclusion: against flat HNSW over the file vectors, a folder layer buys no
+speed and no measurable hit@10 (sessions 5 to 7; H7 dead, +0.0006 [-0.0012, +0.0023]). What stands
+is the representation result: a pooled centroid (a) loses the minority modality of a folder and
+per-modality k-reps (c) recover it (c - a recall@5 +0.238 and +0.233 in the session 3 primary cells
+on the session 5 set).
+Related work checked on 2026-09-30. Li et al., "Closing the Modality Gap for Mixed Modality Search"
+(NeurIPS 2025, arXiv 2507.19054): the image-text modality gap biases ranking in mixed-modality
+corpora; their fix (GR-CLIP) subtracts per-modality mean embeddings post hoc; they evaluate single
+items only (one image and one text) and name multi-image, multi-text documents as future work.
+Grassucci et al., "Closing the Modality Gap Aligns Group-Wise Semantics" (ICLR 2026, arXiv
+2601.18525): closing the gap helps group-wise tasks such as clustering. VectorVFS stores per-file
+vectors only; "Directory-Aware Query and Maintenance in Vector Databases" (arXiv 2606.16903) uses
+directories as path scopes, not as embedded objects. Federated search (resource selection) is the
+classic relative of folder ranking and must be cited. Not read: arXiv 2609.33659 (rate limited).
+This session asks whether the folder-level loss is the modality gap at work, and whether the
+published fix, applied before pooling, gives one vector per folder that recovers what c recovers
+with 5.27 vectors per folder.
+No paper text. No new encoder. No download, no GPU.
+
+## Definitions (fixed now)
+- Input groups, by what the encoder sees. Image inputs: modality image and pdf_scanned. Text
+  inputs: text, table, pdf_text and other.
+- Calibration split: a fixed random 20 percent of the session 5 directories (seed 20260930,
+  stratified by image_frac bucket). Their files are used only to compute the two group means
+  mu_img and mu_txt (means of the unit-normalised file vectors of each group) and are never
+  queries. The other 80 percent of directories are the evaluation split. All 2,808 directories
+  stay ranking candidates.
+- Centering: v' = normalise(v - mu_g) for a file vector v of group g. Queries are centered with
+  their own group mean, as in GR-CLIP.
+- New representations in eval.py build(), all leave-one-out as before:
+  - ac: pooled centroid of the centered child vectors, one vector per folder, queries centered.
+  - ab: balanced centroid, the mean of the per-group centroids of the uncentered child vectors,
+    one vector per folder, queries uncentered.
+  - acb: ab on centered vectors, queries centered.
+  - cc and dc: c and d on centered vectors, queries centered.
+- Modality gap: the distance between the mean image-input vector and the mean text-input vector
+  over the evaluation split (Liang et al., NeurIPS 2022), and the mean cosine of same-folder file
+  pairs within a group and across groups, before and after centering.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H8: on the evaluation split of the session 5 set, the centered pooled centroid ac (one vector per
+folder) recovers more than half of c's gain over the pooled centroid a in both session 3 primary
+cells: for recall@5, (ac - a) - 0.5 * (c - a) > 0 in P1 (image queries in [0,.2) and [.2,.5)
+folders) and in P2 (text-like queries in [.5,.8) and [.8,1] folders).
+Kill: H8 is dead if, in either primary cell, the paired 95% bootstrap interval (1000 resamples
+over directories) of (ac - a) - 0.5 * (c - a) does not lie entirely above zero. Report it plainly
+either way.
+Secondary, reported, no kill: ab and acb the same way; ac - a over all queries and in the two
+majority-modality cells (a fix that wins minority queries by losing majority ones must show
+there); cc - c and dc - d everywhere; the modality gap and the same-folder cosines before and after
+centering; vectors per folder for every representation.
+
+## Steps, in order
+1. The aborted seed-robustness run left edits in the tree; they were moved to
+   /workspace/logs/aborted_s8_seed/ and the tree is clean at the commit that adds this section.
+   Check git status before starting.
+2. Add the calibration split, centering and ac, ab, acb, cc and dc to `scripts/eval.py` as
+   options, defaults unchanged. Check that a, b, c and d on the full set reproduce
+   `results/session5.md` before reading any new number.
+3. `eval.py --criterion s3` on the session 5 set (`--emb jina-embeddings-v4_s5 --manifest
+   data/manifest_s5.jsonl --dirs data/dirs_s5.jsonl --gt data/gt_structural_s5.jsonl`) with the
+   new options, H8 computed exactly as defined, and the modality gap numbers.
+4. `results/session8.md`: the hypothesis block copied verbatim, the related-work paragraph above,
+   the tables, the verdict. NOTES.md session 8 section. Append a proposed session 9 prompt here.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: `data/corpus_s5/` and the cache
+  `data/emb/jina-embeddings-v4_s5/` (27,545 rows, gitignored), venv `/workspace/venv`.
+- CPU only. On a pod whose cgroup allows fewer CPUs than `nproc` reports, set `DIRVEC_THREADS`,
+  `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` to the allowed count.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+
+---
+
+# dirvec, session 9: the compact folder representation (replaces the proposed session 9)
+
+The proposed session 9 (centering at file level against the flat baselines) is dropped: it retests
+a published result (Li et al., NeurIPS 2025 workshop) on our data and cannot change the paper.
+A prior-art search on 2026-09-30 (reports/prior_art_2026-09-30.md, to be added to the repo) found
+no published work on pooled embeddings of mixed-media folders, found the multi-representative
+remedy to be old (PinnerSage, MIND, MaxMF), and found the sharpest reviewer objection to be that
+the minority-modality loss is plain count dilution rather than a modality effect.
+This session answers the open question a solution needs answered: what is the most compact folder
+representation that keeps the minority modality without losing the majority, on a frozen encoder
+with post hoc processing only, and can one vector per folder in the encoder's own space ever do it.
+Same set, same cache as sessions 5 to 8. No download, no GPU. No new encoder. No paper text.
+
+## Definitions (fixed now)
+- Input groups, calibration split (seed 20260930, 20 percent of directories, stratified), group
+  means mu_img and mu_txt, centering, and the evaluation split exactly as in session 8. All 2,808
+  directories are ranking candidates throughout.
+- Dev queries: the 4,388 queries whose directory is in the calibration split (they were unused in
+  session 8). Test queries: the 18,742 queries of the evaluation split, as in session 8. Every
+  parameter below is chosen on dev only; the test split is evaluated once, after the choice, and
+  nothing is changed after that run.
+- Cells: all queries; P1 (image queries in [0,.2)+[.2,.5)); P2 (text-like queries in
+  [.5,.8)+[.8,1]); M1 (image queries in [.5,.8)+[.8,1]); M2 (text-like queries in [0,.2)+[.2,.5)).
+  Metric: recall@5, leave-one-out directory recall as in sessions 2 to 8; recall@1 and recall@10
+  reported alongside. Paired 95 percent bootstrap intervals, 1000 resamples over directories.
+- Reference rows on both splits: a, b, c, d (as before) and ac, cc, dc (centered, session 8).
+- Families of candidate representations, all leave-one-out:
+  F1, single vector in the encoder's space, weighted pooling: the folder vector is the unit
+     normalised sum over its two input groups of w_g * mean_g, with w_g = n_g^alpha and alpha in
+     {0, 0.25, 0.5, 0.75, 1}, on uncentered vectors (alpha = 1 is a, alpha = 0 is ab) and on
+     centered vectors (alpha = 1 is ac, alpha = 0 is acb).
+  F2, single vector after linear cross-modal alignment fitted on the calibration split, then the
+     same weighted pooling grid on the aligned centered vectors. Three alignments, applied to every
+     image-input vector (files and queries): (i) orthogonal Procrustes W fitted on the pairs
+     (centered image-group mean, centered text-group mean) of every calibration directory that has
+     at least one file in each group; (ii) CORAL: whiten the image-group residuals with the
+     calibration image covariance and recolour with the calibration text covariance, both
+     shrunk toward the identity with the Ledoit-Wolf estimate; (iii) ridge least squares on the
+     same pairs as (i), lambda chosen on dev from {1, 10, 100, 1000}. Report the gap and the
+     same-folder cosines (as in session 8) after each alignment.
+  F3, one centroid per input group, at most two vectors per folder: b2 (uncentered) and bc2
+     (centered), scored by max cosine like b. Also bc (the existing six-label b on centered
+     vectors) for reference.
+  F4, the partitioned vector: one index entry per folder of dimension 2d, [mu_img,c ; mu_txt,c],
+     the centered group means (zeros for an absent group). The query of group g is placed as
+     [w_same * q_c ; w_cross * q_c] with the same slot first for an image query and second for a
+     text query; the score is the single inner product. w_same = 1; w_cross chosen on dev from
+     {0, 0.25, 0.5, 0.75, 1}. Variant F4b adds a bias per (query group, folder group) pair chosen
+     on dev as the mean score difference of same-group and cross-group matches on dev. Report the
+     storage as two d-dimensional vectors and the query cost as one inner product.
+  F5, the dilution control, type-blind k-means with max scoring, uncentered and centered, at
+     three budgets: k = min(2, n); k = number of input groups present; k = the sum over the six
+     modality labels of min(3, n_m), which is c's budget. Report cluster purity: over folders with
+     both input groups, the share of files whose cluster's majority input group is their own.
+- Selection on dev, per family: the configuration that maximises the minimum over the four cells
+  (P1, P2, M1, M2) of (x minus c) in recall@5. Ties go to fewer vectors, then smaller alpha or
+  w_cross.
+
+## Hypotheses (fixed now, do not edit after the first test-split run)
+H9a (no single vector suffices): no configuration of F1 or F2, after selection on dev, is within
+0.02 recall@5 of c in both primary cells on the test split while also within 0.02 of c in both
+majority cells. Kill: H9a is dead if the selected F1 or F2 configuration has every one of the four
+paired intervals of (x minus c) with an upper bound above -0.02, that is, if no cell is
+significantly more than 0.02 below c.
+H9b (two centered group vectors suffice): the selected F3 or F4 configuration is within 0.02
+recall@5 of c over all test queries and in every one of the four cells. Kill: H9b is dead if in any
+of the five cells the paired 95 percent interval of (x minus c) lies entirely below -0.02.
+H9c (modality, not dilution): c beats type-blind k-means at c's budget in both primary cells on the
+test split. Kill: H9c is dead if the paired interval of (c minus F5 at c's budget) includes zero in
+either primary cell.
+Secondary, reported, no kill: every family's selected configuration against d and against dc in
+all cells; the full dev grids; the F1 and F2 frontier (the four cells as alpha moves from 0 to 1);
+purity of the type-blind clusters; vectors per folder for every row; two-stage hit@1 and hit@10
+at k = 10 (twostage.py, exact, evaluation-split queries) for the selected F3 and F4 rows against
+c and d.
+
+## Steps, in order
+1. Check git status (clean at the commit that adds this section). Add the dev and test query
+   selection, the families and the selection rule to scripts/eval.py as options, defaults unchanged;
+   add F3 and F4 stage 1 to scripts/twostage.py. Check that a, b, c, d, ac, cc, dc on the
+   evaluation split reproduce results/session8.md before reading any new number.
+2. Run the dev grids for F1 to F5, choose by the selection rule, record the choices in
+   results/session9.md before the test run.
+3. Run the test split once for the reference rows and the selected configurations, then the
+   two-stage rows.
+4. results/session9.md: the hypothesis block copied verbatim, the dev choices, the tables, the
+   verdicts for H9a, H9b and H9c, and a plain statement of what the most compact representation
+   that matches c is, with its vectors per folder and its loss in every cell. NOTES.md session 9
+   section. Append a proposed session 10 prompt here.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: the cache data/emb/jina-embeddings-v4_s5/ (27,545 rows,
+  gitignored), venv /workspace/venv.
+- CPU only. On a pod whose cgroup allows fewer CPUs than nproc reports, set DIRVEC_THREADS,
+  OMP_NUM_THREADS and OPENBLAS_NUM_THREADS to the allowed count. Dev grids can run in parallel
+  processes; keep the total at the allowed count.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+
+# dirvec, session 10 (proposed): the same-modality dilution control
+
+Session 9 (results/session9.md) settled the representation question on this set: no single
+vector in the encoder's space matches c (H9a alive), two blind centered clusters per folder do
+(tb2c, within 0.013 recall@5 of c in every cell, post hoc), and the pre-registered modality-versus-
+dilution test could not separate the two because blind k-means recovers the modality partition
+(purity 0.88 to 0.99), so H9c died without answering the reviewer's objection. This session
+answers it with the control the prior-art report names (reports/prior_art_2026-09-30.md, objection
+table, first row): a minority of the same modality, at the same fraction, from the same kind of
+foreign source, against a minority of the other modality. Same cache, no download, no GPU, no new
+encoder, no paper text. Nothing is fitted on the synthetic folders; the centering means are the
+session 8 calibration means.
+
+## Definitions (fixed now)
+- Hosts: evaluation-split directories (session 8 split, seed 20260930) whose embedded files are all
+  of one input group (image inputs, or text inputs), with at least 6 embedded files. Guests: for
+  each host, files from one other evaluation-split directory (a different Zenodo record) that is
+  also single-group, drawn so that the guest fraction n_G / (n_H + n_G) is a value drawn uniformly
+  from [0.2, 0.5) with seed 20261001; n_G >= 2. Two synthetic sets built from the same hosts, the
+  same fractions and the same seed: SAME (the guest directory has the host's input group) and
+  CROSS (the other input group). A guest directory serves at most one host per set; the guest's
+  remaining files and the guest directory itself are dropped from the candidate list of that set.
+  All other evaluation-split and calibration directories stay as ranking candidates unchanged.
+- Files: scripts/synth.py writes data/manifest_s10_<set>.jsonl (the guest files' dir field set to
+  the host), data/dirs_s10_<set>.jsonl, data/gt_s10_<set>.jsonl (queries: every embedded file of
+  each synthetic folder, marked host or guest; leave-one-out as before; the session 5 dedupe
+  exclusions kept). The cache is not touched: index.jsonl paths still equal the manifest paths.
+- Rows: a, ac, b2, bc2, tb2, tb2c, c, cc, d, dc (eval.py names). Cells per set: guest queries,
+  host queries; guest queries split by fraction [0.2, 0.35) and [0.35, 0.5). Metric recall@5 with
+  recall@1 and recall@10 alongside; paired 95 percent bootstrap intervals, 1000 resamples over
+  hosts (the same hosts in both sets, so SAME and CROSS are paired by host).
+- Loss of a representation x on a cell: (d - x) in recall@5.
+
+## Hypothesis (fixed now, do not edit after the first eval run)
+H10 (modality, beyond dilution): on guest queries the pooled centroid a loses more against d when
+the guest is of the other input group than when it is of the same input group at the same
+fraction: loss_CROSS(a) - loss_SAME(a) > 0. Kill: H10 is dead if the paired 95 percent interval
+over hosts of loss_CROSS(a) - loss_SAME(a) includes zero. Report the two losses themselves and the
+same difference for ac (centering may account for part of it).
+Secondary, reported, no kill: the same difference for tb2, tb2c, b2 and bc2 (does a second
+representative recover a same-modality guest as well as a cross-modality one); host-query losses
+in both sets (what the guest costs the host); losses by fraction bin; the same-folder cosine host-
+guest in both sets next to the session 9 within-group and cross-group numbers; the number of
+hosts, guests and queries per set; vectors per folder.
+
+## Steps, in order
+1. Check git status (clean at the commit that adds this section). Write scripts/synth.py. Check
+   that eval.py on the unmodified session 5 files still reproduces results/session8.md (ranks
+   identical for a, c, d, ac, cc, dc) before reading any synthetic number.
+2. Build SAME and CROSS. Report the counts and the fraction distribution; if fewer than 150 hosts
+   have a guest in both sets, say so and run anyway.
+3. Run eval.py on both sets once (--calib 0.2 --queries eval --s9 style tables restricted to the
+   rows above; a --gt-cells option for the host and guest cells if the cell logic needs it).
+4. results/session10.md: the hypothesis copied verbatim, the counts, the tables, the H10 verdict,
+   and a plain statement, with numbers, of how much of the session 3 minority-modality loss is
+   present with no modality difference at all. NOTES.md session 10 section. Append a proposed
+   session 11 prompt here.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: the cache data/emb/jina-embeddings-v4_s5/ (27,545 rows,
+  gitignored), venv /workspace/venv, session 9 logs in /workspace/logs/s9_*.md.
+- CPU only. On a pod whose cgroup allows fewer CPUs than nproc reports, set DIRVEC_THREADS,
+  OMP_NUM_THREADS and OPENBLAS_NUM_THREADS to the allowed count.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+- Nothing is selected on the synthetic sets; there is no dev split in this session because no
+  parameter is chosen. If a choice turns out to be needed, make it on the calibration-split
+  directories and write it down before the eval run.
+
+---
+
+# dirvec, session 11 (proposed): the two-vector result confirmed on fresh folders with a second encoder
+
+Sessions 8 to 10 settled what the paper can say about the folder representation on the session 5
+set: no single vector in the encoder's space matches c (H9a alive), and two blind centered clusters
+per folder (tb2c, 2.00 vectors) match c within 0.013 recall@5 in every cell (post hoc, session 9).
+Session 10 (results/session10.md) gave the same-modality dilution control its answer on the
+material this corpus allows: H10 survived by little (loss_CROSS(a) - loss_SAME(a) on guest queries +0.180 [+0.021, +0.345]
+over 10 hosts), and three quarters of the pooled centroid's loss on a foreign minority appears with
+no modality difference at all. The labelled two-vector rows (b2, bc2) could not see the
+same-modality minority; the blind two-cluster rows (tb2, tb2c) recovered most of it in both sets.
+That does not change the plan; it makes tb2c, not bc2, the representation to confirm.
+Two things stand between the tb2c result and a paper claim. It is a post hoc pick from a grid, so
+it has never been tested on folders that took part in no selection. And it is one encoder:
+jina-embeddings-v4 (Qwen2.5-VL-3B base). This session is a pre-registered confirmation of both.
+
+## Definitions (fixed now)
+- Corpus: a fresh draw of Zenodo records that took part in no selection. The pool snapshot
+  `data/pool.jsonl.gz` is spent (its 3,609 eligible records went into sessions 1, 3 and 5), so
+  `fetch.py select` takes a new snapshot: the session 1 query (files.types image and text, 3 to 60
+  files, public, CC0 or CC-BY), the same eligibility, caps and licence rule, the pages beyond the 20
+  per year already taken (or the years 2017 to 2026 in descending record order), with every concept
+  in `data/selection.jsonl`, `selection_s3.jsonl` and `selection_s5.jsonl` excluded. Target 2,000 to
+  2,800 directories, uniform within the eligible pool, seed 20261101; fewer than 1,500 eligible is a
+  wall to report, not to work around. Zenodo stays the source for the reasons of session 1 (per-record
+  folders assembled by real people, a filterable licence field; NTSB and EPA are PDF containers).
+- Ground truth, input rules, dedupe, calibration split (20 percent, stratified, a fresh seed
+  20261102) and centering: as in sessions 5, 8 and 9, per encoder (the group means are recomputed
+  on the new calibration split for each encoder; nothing else is fitted).
+- Encoders: (E1) jina-embeddings-v4, the study's encoder, same revision and input rules as session 5;
+  (E2) one CLIP-family dual tower, jina-clip-v2 (open weights, CC-BY-NC-4.0, research use as with
+  the Qwen Research License of E1; 8k-token text tower, so file texts are not truncated to 64 tokens
+  as they would be under SigLIP or OpenAI CLIP). Chosen over the session 2 runner-up
+  nomic-embed-multimodal-3b because that model shares E1's Qwen2.5-VL-3B base and would confirm the
+  base model, not the finding. Optional, if the pod has the time: (E3) gme-Qwen2-VL-2B-Instruct
+  (Apache-2.0), a VLM embedder on a different Qwen generation, as the prior-art report suggests.
+  Before E2 embeds the corpus, the session 2 pilot check (20 directories: text to own-directory
+  image median rank against random) is run and reported; if E2 fails it (median rank no better than
+  random), say so and use E3 as E2. Licence doubt on any encoder is a wall: ask.
+- Rows per encoder: a, ac, c, cc, d, dc, bc2, tb2c (tb2 alongside, uncentered). Cells: all, P1, P2,
+  M1, M2 as in session 9. Metric recall@5 with recall@1 and recall@10 alongside; paired 95 percent
+  bootstrap intervals, 1000 resamples over directories.
+
+## Hypotheses (fixed now, do not edit after the first eval run on the new corpus)
+H11a (two blind centered clusters match c, fresh folders): on the new corpus under E1, tb2c is within
+0.02 recall@5 of c over all queries and in each of P1, P2, M1, M2. Kill: H11a is dead if in any of
+the five cells the paired interval of (tb2c - c) lies entirely below -0.02.
+H11b (the finding is not the encoder): under E2, the pooled centroid a loses to c in both primary
+cells (c - a interval above zero in P1 and P2, as in session 3), and tb2c is within 0.02 of c by the
+H11a rule. Kill: H11b is dead if either part fails under E2.
+Secondary, reported, no kill: the same rows under E3 if run; c - a, cc - c, dc - d, bc2 - c in every
+cell per encoder; the modality gap and the same-folder cosines per encoder before and after
+centering; purity of the blind two-cluster split per encoder; vectors per folder; the session 10
+counts of single-group directories in the new corpus (whether a larger dilution control becomes
+possible).
+
+## Steps, in order
+1. Check git status. New pool snapshot and selection (`fetch.py select`, new options only if the
+   page window needs one); report eligible per bucket and the draw. Download (40 workers, md5).
+   `manifest.py`, `build_gt.py`.
+2. E1 embedding on the full card (session 5: 270 files/min, about 100 minutes for 27,000 files;
+   one job on the GPU at a time). E2 pilot, then E2 embedding. E3 only after E1 and E2 are cached.
+3. One eval.py run per encoder on the evaluation split (`--calib 0.2 --s9` restricted to the rows
+   above); no dev run, nothing chosen.
+4. results/session11.md: the hypotheses verbatim, the corpus counts, the pilot, the tables, the
+   verdicts. NOTES.md session 11 section. Append a proposed session 12 prompt here.
+
+## Inputs
+- Repo at HEAD. A full GPU pod (a full RTX PRO 6000 or equivalent, 32 GB or more): the E1 cache
+  alone is 100 minutes of GPU time, and a second encoder doubles it. /workspace volume with the
+  venv; the corpus is about 28 GB at session 5 size.
+- Zenodo guest rate limits as in session 5 (80 to 120 files/min): about 4 to 5 hours of download
+  for 27,000 files, overlapped with embedding as in session 5.
+
+## Rules
+- Ask Ali only at walls: GPU access, model weights that need a login, licence doubt.
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Never wait on a job with pgrep -f in a loop. Run long jobs as background tasks.
+- Nothing is selected on the new corpus. If a choice turns out to be needed, make it on the
+  calibration split and write it down before the eval run.
+
+---
+
+# dirvec, session 12: description queries and split robustness (replaces the proposed budget-rule session)
+
+Session 11 (results/session11.md) closed the experimental plan the paper needs; the draft is in
+paper/main.tex. Its limitations section names two objections that a cheap CPU session can meet
+on the caches already on the volume, so this session meets them before the draft is bulletproofed.
+The budget-rule question (a representation between two and five vectors that holds across
+encoders) stays open and optional; it is secondary here. The pod's Claude Code session is
+rate-limited until 2026-10-04, so this session is driven by hand through the pod's command
+endpoint; the scripts and outputs are committed as in every other session.
+
+## Definitions (fixed now)
+- Query sets on the session 11 corpus (2,597 directories, all ranked): Q_title, the Zenodo record
+  title of each directory, from data/pool_s11.jsonl.gz; Q_desc, the title followed by the record's
+  description (metadata.description from the Zenodo record API, HTML stripped), for every record
+  whose description could be fetched before the eval run. The query is not a file, so the
+  directory representations are built from all of the directory's embedded files (no leave-one-out)
+  and every directory with at least one embedded file is a candidate and a query.
+- Encoders E1 and E2 as in session 11, text through the query-side path, the same 2,000-token cut.
+  Centered rows center the query with mu_txt of the session 11 calibration split (seed 20261102),
+  the query being a text input; nothing is fitted on the queries.
+- Rows: a, ac, c, cc, d, dc, bc2, tb2, tb2c (eval.py builders, scripts/descq.py). Cells: all
+  directories; text-heavy directories (image fraction in [0,.2) and [.2,.5)); image-heavy
+  directories ([.5,.8) and [.8,1]); and the four buckets. Metric recall@5 with recall@1 and
+  recall@10 alongside; paired 95 percent bootstrap intervals, 1000 resamples over directories
+  (one query per directory per set).
+- Split robustness: the session 11 evaluation of results/session11.md repeated with calibration
+  seed 20261103 (the same fraction and stratification), both encoders, the same rows and cells.
+
+## Hypotheses (fixed now, do not edit after the first eval run)
+H12a (the loss reaches natural-language queries): on Q_title under E1, the pooled centroid a loses
+to c on image-heavy directories: the paired interval of (c - a) in recall@5 over image-heavy
+directories lies above zero. Kill: H12a is dead if that interval includes zero.
+H12b (the session 11 verdicts do not depend on the split): under calibration seed 20261103, the
+intervals of (c - a) in P1 and P2 exclude zero under both encoders, and under E1 no interval of
+(tb2c - c) over the five session 9 cells lies entirely below -0.02. Kill: H12b is dead if either
+part fails.
+Secondary, reported, no kill: H12a's statistic under E2 and on Q_desc; (c - a) on text-heavy
+directories and per bucket; (tb2c - c), (bc2 - c), (cc - c), (d - c) and (dc - d) per cell on both
+query sets and both encoders; recall@1 and recall@10; the number of records with a description;
+the tb2c - c cells under the second seed next to the first.
+
+## Steps, in order
+1. Fetch the descriptions (scripts/fetch_desc.py, resumable, one request per second, into
+   data/desc_s11.jsonl). Embed Q_title and Q_desc with E1 and E2 (scripts/descq.py embed) into
+   data/emb/<emb>/descq_s12.npz.
+2. Run the second-seed evals (eval.py as in session 11 with --calib-seed 20261103, tags
+   _s12_e1seed2 and _s12_e2seed2).
+3. Run scripts/descq.py eval for both encoders and both query sets; write
+   /workspace/logs/s12/descq_<encoder>.md.
+4. results/session12.md: the hypotheses verbatim, the counts, the tables, the verdicts; NOTES.md
+   session 12 section; the draft's limitations and results updated in a later commit.
+
+## The numbers the draft takes from the repo (carried over from the proposed budget-rule section, which stays optional)
+- Diagnosis, pre-registered on fresh folders: results/session3.md (session 3 corpus, c - a in P1
+  and P2) and results/session11.md "Session 3 primary cells" tables for E1 and E2 (c - a +0.253
+  and +0.169 under E1, +0.500 and +0.348 under E2, with intervals).
+- Scale and the flat baseline: results/session5.md (2,808 directories, two-stage c within 0.001
+  hit@10 of exact d, share of vectors 0.55), results/session7.md (H7 dead: a folder layer buys
+  nothing over flat HNSW, +0.0006 [-0.0012, +0.0023]).
+- Mechanism: results/session8.md (modality gap 0.361, same-folder cosines before and after
+  centering, H8 dead: centering recovers 49 percent in P1), results/session11.md gap table (0.381
+  under E1, 0.787 under E2) and the ac rows.
+- Remedy and budget: results/session13.md for every single-vector (F1, F2) number: 40 distinct
+  single vectors on the test split, none within 0.02 of c in all four cells, each at least 0.042
+  below c in M2 (this line said "results/session9.md (22 single-vector variants ...)" until the audit
+  of 2026-10-01; session 9's F1 and F2 rows were biased by a ranking bug and its table had 18 such
+  rows, not 22); results/session9.md for the F3, F4 and F5 rows, the dev and test tables and tb2c
+  post hoc; results/session11.md (H11a and H11b verdicts, the x - c and
+  x - d tables per encoder, purity), results/session10.md (the same-modality dilution control:
+  loss_CROSS(a) - loss_SAME(a) +0.180 [+0.021, +0.345] over 10 hosts; three quarters of the pooled
+  loss present with no modality difference; tb2 and tb2c against b2 and bc2 on SAME).
+- Corpus and encoder facts: NOTES.md sessions 1, 5 and 11 part A (Zenodo selection, licences,
+  counts per bucket, dedupe, input rules, revisions); reports/prior_art_2026-09-30.md and
+  reports/citations_verified.md for related work and the bibliography.
+
+## Rules
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write. Leave the em dashes inside verbatim Zenodo data.
+- Nothing is selected on the queries; no parameter is chosen in this session.
+
+---
+
+# dirvec, session 13: correction rerun of the session 9 single-vector rows
+
+On 2026-10-01 the draft was audited against results/ by checkers that had not seen it
+(reports/number_audit_2026-10-01.md). The audit found an evaluation bug that touches one family of
+rows and nothing else: every F1 and F2 row of session 9 is scored too low.
+
+- Mechanism: `build()` for the weighted-pooling base ("p", every `<space>_p<alpha>` name) multiplied a
+  float32 mean by a NumPy float64 scalar (`g.sum() ** param`), so the folder vector was float64.
+  `rank_rep()` computed the query's own-directory score in float64, wrote it into a float32 score
+  row, and counted `s > own` against the unrounded float64 value. Whenever the float32 rounding went
+  up, the query's own directory counted as scoring strictly higher than itself: rank + 1 in about
+  half the queries.
+- Evidence in the committed tables: u_p1 is a and c_p1 is ac by definition (session 9, F1), yet
+  results/session9.md prints recall@1 0.274 against 0.555 and 0.295 against 0.588, and recall@5
+  0.681 against 0.689 and 0.715 against 0.724. Every F1 and F2 row has recall@1 between 0.27 and
+  0.30. scripts/selftest_ranks.py reproduces this on a synthetic corpus with the old eval.py and
+  passes with the fix (commit before this section).
+- Not touched: every other row of the study is float32 on both sides of the comparison (a, b, c,
+  c4, c2, d, ab, acb, ac, cc, dc, b2, bc, bc2, f4, f4b and the tb rows). Sessions 2 to 8 and 10 to
+  12 never used the weighted-pooling builder. The rerun checks this (C2 below).
+- Direction: the bias lowers the single-vector rows, so it favours H9a. The verdict has to be
+  re-read on corrected rows before the paper quotes any of them.
+
+Same set, same cache, same calibration split (seed 20260930) as session 9. CPU only. No new
+representation, no new parameter, no paper text in this session.
+
+## Definitions (fixed now)
+- Everything as in session 9: input groups, the calibration split, dev queries (4,388) and test
+  queries (18,742), the five cells, recall@5 with recall@1 and recall@10 alongside, paired 95 percent
+  bootstrap intervals over directories, the families, and the selection rule (per family, the
+  configuration that maximises the minimum over P1, P2, M1, M2 of x minus c on dev; ties to fewer
+  vectors, then smaller alpha; F2 is selected on the two-fold cross-fitted dev grid, as in session 9).
+- Runs (scripts/s13_run.sh, one chain, new tags so that no session 9 file is overwritten):
+  1. dev grid, literal: the 66 names of session 9 plus ab and acb (`--tag _s13dev`);
+  2. dev grid, two-fold cross-fitted F2: the 37 names of session 9 (`--tag _s13devcv`);
+  3. test split: the 33 rows of session 9, ab and acb, and every other F2 name (59 rows,
+     `--tag _s13test`), so that whatever configuration the corrected dev grids select is already
+     scored. The test rows are all computed in one run; which of them carry the verdict is fixed by
+     the dev grids and the selection rule, not by looking at the test table.
+- Checks, read before any corrected number:
+  C1. scripts/selftest_ranks.py passes on the pod.
+  C2. Reproduction: for every row that does not use the weighted-pooling builder, the ranks in the
+      new files are identical to the session 9 files (ranks_s9dev, ranks_s9devcv, ranks_s9test) on
+      every query. If any such row differs, stop and report; nothing else is read.
+  C3. Identity: in the new files u_p1 has a's ranks and c_p1 has ac's on at least 99 percent of the
+      queries, and u_p0 and c_p0 match ab and acb the same way, with recall@5 within 0.001 in each
+      of the five cells.
+
+## Hypothesis (H9a as fixed in session 9, re-read on the corrected rows; nothing reworded)
+H9a (no single vector suffices): no configuration of F1 or F2, after selection on dev, is within
+0.02 recall@5 of c in both primary cells on the test split while also within 0.02 of c in both
+majority cells. Kill: H9a is dead if the selected F1 or F2 configuration has every one of the four
+paired intervals of (x minus c) with an upper bound above -0.02, that is, if no cell is
+significantly more than 0.02 below c.
+- The verdict is read on the configurations the corrected dev grids select. If they differ from
+  session 9's selections (c_p0.5 and coral_p0.75), both sets are reported and the corrected
+  selection carries the verdict.
+- Expectation, written before the run, not a kill: the F1 and F2 rows rise by about 0.005 to 0.015
+  recall@5 and by about a factor of two at recall@1; H9a survives; the best minimum over the four
+  cells among the one-vector test rows moves from -0.060 to about -0.05.
+Secondary, reported, no kill:
+- for every one-vector test row: x minus c per cell with intervals, the minimum over the four cells,
+  the number of cells with the point estimate within 0.02 of c, and the number of cells whose
+  interval has an upper bound above -0.02. If any one-vector row, selected or not, has all four upper
+  bounds above -0.02, say so plainly: H9a would still stand by its rule (selection is on dev), but
+  the paper's sentence that no single vector matches c would have to name the exception;
+- the count of one-vector rows in the dev grids and in the test run (session 9's prose says 22; its
+  table has 18);
+- the in-sample and the cross-fitted recall@5 of Procrustes at alpha 0.5 in P1 on dev (the leak
+  illustration; session 9's prose quotes a smoke-test figure);
+- the equal-weight corners (u_p0 and c_p0) against a and against c;
+- how far each affected row moved (scripts/s13_check.py).
+H9b and H9c and every F3, F4 and F5 number of session 9 stand as they are if C2 holds.
+
+## Steps, in order
+1. Check the RunPod balance in the console. Resume the MIG slice pod, run /workspace/setup_pod.sh,
+   start scripts/pod_autostop.sh with a deadline 75 minutes after the resume and the markers
+   /workspace/logs/s13/DONE and /workspace/logs/s13/FAILED. Verify the watcher's pid.
+2. `git pull` in the pod's clone, then `bash scripts/s13_run.sh` as a background job. It runs the
+   selftest, the three eval runs and the rank checks, writes results/session13_outputs.md (the
+   outputs verbatim), commits and pushes that file, and writes the DONE marker.
+3. Stop the pod (the watcher does it; confirm in the console).
+4. results/session13.md: this hypothesis block verbatim, the checks, the corrected tables, the
+   verdict, and the list of sentences in results/session9.md, NOTES.md and the draft that the
+   corrected rows replace. NOTES.md session 13 section. An erratum line at the top of
+   results/session9.md that points here; its tables stay as they were computed.
+
+## Inputs
+- Repo at HEAD. On the /workspace volume: the cache data/emb/jina-embeddings-v4_s5/ and the session
+  9 rank files in it, venv /workspace/venv.
+- CPU only, about 25 minutes (session 9: dev grid 6 minutes, cross-fitted grid 4, test run 13, on two
+  threads). MIG 1g.24gb slice at $0.59 an hour; expected cost under $1.
+- Driven by hand through the pod's command endpoint; the pod's Claude Code is not used, so the
+  weekly usage limit (resets 2026-10-04 06:00 UTC) does not gate this session.
+
+## Rules
+- One commit per deliverable. Nothing beyond what is listed.
+- No em dashes in anything you write.
+- Nothing is selected on the test split. The selection rule is applied to the corrected dev grids
+  and to nothing else.
+- If C2 fails, or the pod cannot be reached, stop and report; do not work around it.
+
+---
+
+# dirvec, session 14: a third encoder from another vendor (E3) on the confirmation set
+
+Why this session exists. The draft's limitations name its cheapest point of attack: both encoders
+come from one vendor (Jina), and every statement about a second encoder family rests on one model
+that is also the weaker cross-modal encoder on these files. This session adds one encoder from
+another vendor on another base, on the confirmation set S11, under the session 11 protocol.
+Nothing else changes. Ali approved the compute on 2026-10-01 at 19:40 Toronto.
+
+## Encoder E3 (fixed now)
+- Alibaba-NLP/gme-Qwen2-VL-2B-Instruct, revision 9cfa6413f704a7c1cf5064d240748e10c876b286
+  (Apache-2.0), a unified multimodal embedder on Qwen2-VL-2B (E1 is jina-embeddings-v4 on
+  Qwen2.5-VL-3B): 1,536 dimensions, last-token pooling, L2-normalised; cited in the draft as GME.
+- Inputs: the same `prepare()` as E1 and E2. Texts are cut to their first 2000 tokens with E1's
+  tokenizer (the same characters as E1 and E2 read), images are the same decoded RGB, a scanned PDF
+  is the mean of its first eight page renders.
+- E3 settings, written down before any E3 number: bfloat16; max_image_tokens 768 (E1's pixel cap,
+  602,112 pixels) and the model's default min_image_tokens 256; max_length 2200, so a 2000-token
+  text keeps the end token the model pools on; no instruction for any input (the model's default
+  system prompt), so its query and document paths are the same and the cache is built with
+  `--text-mode query` as E1's and E2's were; the model's own `embed()` in batches of 8.
+- Environment: the E1 venv with transformers 4.51.3 first on PYTHONPATH (the model's code refuses
+  4.52 and later); weights on the pod's container disk. scripts/embed.py (E3 branch) passed a CPU
+  smoke test with a one-layer random-weight copy of the model (settings take, 2000-token texts keep
+  the end token, odd image sizes go through, unit vectors of 1,536 dimensions); no E3 number from
+  real weights has been computed.
+
+## Gate (fixed now)
+The session 2 check on the 20 calibration-split directories of S11 that E2's pilot used
+(`embed.py pilot --model gme-Qwen2-VL-2B-Instruct --manifest data/manifest_s11.jsonl --dirs
+data/dirs_s11.jsonl --tag _s11 --calib 0.2 --calib-seed 20261102`). If E3's median rank of
+own-directory images for text and table files is not below the random median, stop: no corpus
+embedding, no evaluation; report the pilot.
+
+## Hypotheses (fixed now, do not edit after the pilot)
+H14a (the loss holds under a third encoder): on the S11 evaluation split (calibration seed
+20261102, the session 11 queries), under E3, the paired 95 percent interval of (c minus a) in
+recall@5 lies above zero in P1 and in P2. Kill: H14a is dead if either interval includes zero or
+lies below it.
+H14b (per-modality representatives keep file-level search under E3): no paired 95 percent interval
+of (c minus d) in recall@5 over all queries, P1, P2, M1 or M2 lies entirely below -0.02. Kill: H14b
+is dead if any of the five does.
+Secondary, reported, no kill: recall@5 of a, ac, bc2, tb2, tb2c, c, cc, d, dc in the five cells
+(the draft's Table 3 rows), with recall@1 and recall@10; tb2c minus c read by the H11a rule (the
+two-vector budget under E3); centering's share of the loss, (ac - a) / (c - a) in P1 and P2; the
+gap table (norm of mean image-input minus mean text-input vector, same-folder cosines, uncentered
+and centered); purity of blind 2-means; the session 12 title and description queries under E3
+(descq.py: H12a's statistic and the per-cell table); E3's ok set against E1's.
+Expectation, written before the run, not a kill: the loss holds in both minority cells, of a size
+between E1's and E2's if E3's gap lies between theirs; c stays within 0.02 of d.
+
+## Steps, in order
+1. Commit this brief, the E3 branch of scripts/embed.py and the driver scripts/s14_run.sh before
+   anything runs.
+2. Check the RunPod balance. Resume the RTX PRO 6000 pod 87euwc629ejvph (50 GB container disk), or
+   the MIG slice bmao44n64ohrwp with DIRVEC_IMG_BATCH=4 if the full card is not available; run
+   /workspace/setup_pod.sh; start scripts/pod_autostop.sh with a deadline 3.5 hours after the resume
+   and the markers /workspace/logs/s14/DONE and /workspace/logs/s14/FAILED; verify its pid.
+3. `git pull` in the pod's clone, then `bash scripts/s14_run.sh` as a background job: environment
+   check, pilot and gate, `embed.py all` on S11, the session 11 eval command line with
+   `--tag _s14_e3`, descq.py embed and eval, the ok-set comparison; it writes
+   results/session14_outputs.md (outputs verbatim), commits and pushes it, and writes DONE.
+4. Confirm the pod stopped. results/session14.md (this hypothesis block verbatim, the verdicts, the
+   secondaries), NOTES.md, then the draft (the third encoder enters the abstract, Sections 4, 5, 7
+   and 8, Table 3 or a new table, the limitations), each as its own commit.
+
+## Inputs and budget
+- On the /workspace volume: data/corpus_s11 (the files), the E1 venv, the E1 cache for the ok-set
+  comparison. E3 weights (8.8 GB) download to the container disk.
+- Expected: about 1.5 hours on the full card at $2.09 an hour, about $3; the watcher caps it at
+  3.5 hours (about $7.30). Balance $20.62 at 23:50 UTC on 1 October.
+- Driven by hand through the pod's command endpoint; the pod's Claude Code is not used.
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; every E3 setting is fixed above.
+- If the gate fails, stop and report. If the pod cannot be reached or a step fails, stop the pod and
+  report; do not work around it.
+
+# dirvec, session 15: a second CLIP-family dual tower (E4, Nomic) on the confirmation set
+
+Why this session exists. After session 14 the draft's encoder limitation has two parts: both
+vision-language embedders are built on Qwen models, and every statement about a CLIP-family dual
+tower rests on one model, jina-clip-v2 (E2), which is also the weakest cross-modal encoder of the
+three on these files. The draft says the loss grows to 0.35 to 0.50 under a CLIP-family dual
+tower. This session tests that on a second dual tower from a third vendor, on S11, under the
+session 11 protocol. Ali asked for it on 2026-10-01 at 22:05 Toronto ("run it, make it robust").
+
+## Encoder E4 (fixed now)
+- Nomic Embed v1.5 (Nomic AI, Apache-2.0), a dual tower: the image tower
+  nomic-ai/nomic-embed-vision-v1.5 (revision e3a725bce72db07ca4adb1d83da08903f3ee02f8, a ViT-B/16 at
+  224 pixels) was trained contrastively against the frozen text tower
+  nomic-ai/nomic-embed-text-v1.5 (revision e5cf08aadaa33385f5990def41f7a23405aec398, the last before
+  the repository's transformers 5 rewrite; a BERT-style encoder with rotary positions); model code
+  nomic-ai/nomic-bert-2048 at revision 7710840340a098cfb869c4f65e87cf2b1b70caca (trust_remote_code,
+  code_revision pinned). 768 dimensions. A CLIP-family dual tower in the draft's sense: two
+  encoders, one contrastive objective, no cross-attention between the modalities.
+- Inputs: the same prepare() as E1 to E3. Texts are cut to their first 2000 tokens with E1's
+  tokenizer (the same characters E1 to E3 read), then go through E4's tokenizer with a limit of 8192
+  tokens and rotary_scaling_factor 2 (dynamic NTK scaling; the model's code changes nothing below its
+  2048 trained positions, checked on CPU: identical vectors for a 1,406-token text with and without
+  it). Images are the same load_rgb images through E4's shipped preprocessing (CLIPImageProcessor:
+  resized to 224 by 224 pixels without keeping the aspect ratio; its centre crop then removes
+  nothing). A scanned PDF is the mean of its first eight page renders.
+- E4 settings, written down before any E4 number: float32; text vector = mean of the last hidden
+  states over the attention mask, layer norm without parameters, L2 normalisation (the model card's
+  recipe, all 768 dimensions); image vector = the first (CLS) token of the last hidden state, L2
+  normalised (the model card's recipe). Every text input gets the prefix "search_query: ", the one
+  the model card names for text used against images, so files and the title or description queries
+  share one text path; the cache is built with --text-mode query, as for E1 to E3 (the pilot also
+  reports "search_document: " as its doc mode, for information only).
+- Environment: the E1 venv (transformers 4.52.4, einops already installed for E2); weights and
+  model code on the pod's container disk (HF_HOME /root/hf_nomic). scripts/embed.py (E4 branch)
+  passed a CPU test with the real weights before this brief was committed: both towers load with all
+  keys matched, encode_texts and encode_images equal the model card's recipe to 1e-7, embed_rows
+  gives unit vectors of 768 for an image, a text, a table, a text PDF and a scanned PDF, and on four
+  synthetic images (a bar chart, a line plot, a text page, a red circle) each image's nearest of four
+  captions is its own. No E4 number on a dirvec file has been computed.
+
+## Gate (fixed now)
+As session 14: the session 2 check on the 20 calibration-split directories of S11 that E2's pilot
+used (`embed.py pilot --model nomic-embed-v1.5 --manifest data/manifest_s11.jsonl --dirs
+data/dirs_s11.jsonl --tag _s11 --calib 0.2 --calib-seed 20261102`). If E4's median rank of
+own-directory images for text and table files (query prefix) is not below the random median, stop:
+no corpus embedding, no evaluation; report the pilot.
+
+## Hypotheses (fixed now, do not edit after the pilot)
+H15a (the loss under a second dual tower): on the S11 evaluation split (calibration seed 20261102,
+the session 11 queries), under E4, the paired 95 percent interval of (c minus a) in recall@5 lies
+above zero in P1 and in P2. Kill: H15a is dead if either interval includes zero or lies below it.
+H15b (per-modality representatives keep file-level search under E4): no paired 95 percent interval
+of (c minus d) in recall@5 over all queries, P1, P2, M1 or M2 lies entirely below -0.02. Kill: H15b
+is dead if any of the five does.
+H15c (the larger loss belongs to dual towers, not to one model): on the same queries, the loss
+under E4 exceeds the loss under E1: the paired 95 percent interval of [(c - a) under E4] minus
+[(c - a) under E1] in recall@5, over 1000 resamples of the cell's evaluation directories with
+eval.py's cell seeds (scripts/xenc.py), lies above zero in P1 and in P2. Kill: H15c is dead if
+either interval includes zero or lies below it.
+Secondary, reported, no kill: everything session 14 reported (the Table 3 rows with recall@1 and
+@10, tb2c minus c read by the H11a rule, centering's share, the gap table, purity, the title and
+description queries, the ok set against E1, the longest E4 text input); xenc.py's statistic for E4
+against E2 and E3 and for E2 against E1; xenc.py's per-encoder c - a intervals checked against
+eval.py's.
+Expectation, written before the run, not a kill: E4's gap is wide like E2's and its loss lies above
+E1's in both minority cells; c stays within 0.02 of d.
+
+## Steps, in order
+1. Commit this brief, the E4 branch of scripts/embed.py, scripts/xenc.py and the driver
+   scripts/s15_run.sh before anything runs.
+2. Check the RunPod balance. Resume an RTX PRO 4500 pod (8ojyoafh1y9b1y or yluxzcpa67mk51; 16
+   vCPUs, $0.72 an hour), or an RTX PRO 6000 pod (87euwc629ejvph, 3m5g5g80psfwnm) if neither has a
+   free GPU; run /workspace/setup_pod.sh; start scripts/pod_autostop.sh with a deadline 3 hours
+   after the resume and the markers /workspace/logs/s15/DONE and /workspace/logs/s15/FAILED; verify
+   its pid.
+3. `git pull` in the pod's clone, then `bash scripts/s15_run.sh` as a background job: environment
+   check, pilot and gate, `embed.py all` on S11 with 14 preparation threads (the number of threads
+   changes no vector), the ok-set comparison, the session 11 eval command line with `--tag _s15_e4`,
+   xenc.py with its check, descq.py embed and eval; it writes results/session15_outputs.md (outputs
+   verbatim), commits and pushes it, and writes DONE.
+4. Confirm the pod stopped. results/session15.md (this hypothesis block verbatim, the verdicts, the
+   secondaries), NOTES.md, then the draft, each as its own commit.
+
+## Inputs and budget
+- On the /workspace volume: data/corpus_s11, the E1 venv, the E1, E2 and E3 caches and their ranks
+  (ranks_s11_e1, ranks_s11_e2, ranks_s14_e3). E4 weights (about 0.9 GB) download to the container
+  disk.
+- Expected: about an hour, bound by input preparation as in session 14; about $1 on a 4500 pod at
+  $0.72 an hour. The watcher caps it at 3 hours ($2.20 on a 4500, $6.30 on a 6000). Balance $18.03
+  at 02:10 UTC on 2 October.
+- Driven by hand through the pod's command endpoint; the pod's Claude Code is not used.
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; every E4 setting is fixed above.
+- If the gate fails, stop and report. If the pod cannot be reached or a step fails, stop the pod and
+  report; do not work around it.
+
+---
+
+# dirvec, session 16: the target type known in advance (type composition as a filter, as a prior, and type-only groups)
+
+Why this session exists. Ali asked on 2026-10-02 at 00:03 Toronto: when the searcher already knows
+the target type (a video, an image, a PDF), does storing each folder's type composition in its
+metadata help? Every result so far scores a query against folders without using its type. This
+session measures three ways a system could use a known type, on the confirmation set S11 under all
+four encoders, from the caches already on the volume: CPU only, no new embedding. It also answers
+the question the remedy invites: if the type is known, why not keep one pooled vector per type and
+score the query against that one? The corpus was selected for mixed folders (images in 96.8
+percent of S11 folders by the manifest, both input groups in 95.5 percent), so a filter by type can
+prune little here, and this corpus cannot show what a tree of single-type folders would gain. Ali
+asked for the session on 2026-10-02 at 00:08 Toronto. Target: the SIGIR version, not the preprint.
+
+## Definitions (fixed now)
+- Set and queries: S11, the session 11 evaluation split (calibration fraction 0.2, seed 20261102),
+  the evaluation queries with a vector, all directories ranked. Dev queries (those whose directory
+  is in the calibration split) choose the prior's weight and nothing else.
+- Encoders: E1 to E4, the S11 caches data/emb/jina-embeddings-v4_s11, jina-clip-v2_s11,
+  gme-Qwen2-VL-2B-Instruct_s11 and nomic-embed-v1.5_s11, uncentered unit vectors as in rows a, c
+  and d. Nothing is embedded.
+- The type a searcher can know is the file's kind as a file system records it, from the study's
+  labels: image; pdf (pdf_text or pdf_scanned, since a searcher who wants a PDF does not know
+  whether it was scanned); text; table; other. A query's type is its own kind.
+- Composition: per directory, the number of its files of each kind over the manifest (every kept
+  file, with or without a vector). The query file is counted in its own directory's composition,
+  since the stored folder holds it; leave-one-out applies to the vectors only. share_T(D) is the
+  directory's files of kind T over all its files.
+- Base rows: a (pooled centroid), c (per-modality k-means, k = min(3, n_m) per label) and d (every
+  file), eval.py's builders, leave-one-out as in eval.py. Their ranks must equal the ranks files of
+  sessions 11, 14 and 15 (rank_a, rank_c, rank_d of ranks_s11_e1, ranks_s11_e2, ranks_s14_e3 and
+  ranks_s15_e4) query for query; any difference stops the run before any other number is printed.
+- x+F, the filter, for x in a, c, d: only directories whose composition holds the query's kind are
+  ranked. The query's own directory always is.
+- x+P, the prior: score(q, D) + tau * ln share_T(D) over the directories x+F ranks. tau per encoder
+  and per x, chosen on the dev queries: the value in {0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+  0.2, 0.5} with the highest recall@5 over all dev queries, ties to the smaller tau. As tau goes to
+  zero, x+P becomes x+F.
+- x_T, type-only groups (Ali's first design, separate embedding groups per type, with the type
+  known): a directory is scored only by its representatives of the query's kind. a_T: the unit
+  mean of its files of that kind, one vector per kind present. c_T: c's representatives of the
+  labels of that kind (a pdf query sees the pdf_text and the pdf_scanned representatives). d_T: its
+  files of that kind. A directory with no vector of that kind is not ranked. Leave-one-out as in
+  eval.py: the own directory's groups are rebuilt without the query file.
+- Singletons: queries whose own directory keeps no other file of their kind with a vector. Under
+  x_T the own directory has nothing to match, so they are misses by construction. They are counted
+  per cell and reported apart. Every comparison with an x_T row is on the other queries (the
+  non-singleton set), with x, x+F and x+P on the same set beside it; the singletons get x, x+F and
+  x+P only.
+- Cells: all, P1, P2, M1, M2 as in session 9; also the query's fine label (image, pdf_text,
+  pdf_scanned, text, table, other) and its input group (image inputs: image and pdf_scanned; text
+  inputs: the rest). Metric recall@5, with recall@1 and recall@10 alongside. Paired 95 percent
+  bootstrap intervals, 1000 resamples of the cell's directories, eval.py's cell seeds (all 1, P1 50,
+  P2 51, M1 56, M2 57, the fine labels 20 plus their position in eval.py's MODALITIES, the input
+  groups 90 and 91), the same seeds on the non-singleton set. Rank as eval.py: 1 plus the number of
+  ranked directories that score strictly higher than the own directory (float32 scores, float64 once
+  the prior is added).
+- Code: scripts/typeq.py, one run per encoder, and the driver scripts/s16_run.sh.
+
+## Hypotheses (fixed now, do not edit after the first evaluation run)
+H16a (knowing the type does not rescue the pooled vector): on the evaluation queries, the paired 95
+percent interval of (c+F minus a+F) in recall@5 lies above zero in P1 and in P2. Read under each
+encoder. Kill: H16a is dead under an encoder if either interval includes zero or lies below it.
+H16b (Ali's design: with the type known, one pooled vector per type keeps per-type
+representatives): on the non-singleton evaluation queries, no paired 95 percent interval of (a_T
+minus c_T) in recall@5 over all queries, P1, P2, M1 or M2 lies entirely below -0.02. Read under
+each encoder. Kill: H16b is dead under an encoder if any of the five does.
+H16c (a composition prior trades the minority for the majority): with tau chosen on the dev
+queries, the paired 95 percent interval of (c+P minus c+F) in recall@5 lies below zero in P1 and in
+P2. Read under each encoder. Kill: H16c is dead under an encoder if either interval includes zero
+or lies above it.
+The paper states a hypothesis as holding only where it holds under all four encoders.
+Secondary, reported, no kill: every row in every cell with recall@1 and recall@10; x+F minus x,
+x+P minus x+F, x_T minus x+F, c_T minus d_T, a_T minus d_T and a_T minus c+F with intervals; the
+dev grid and the selected tau per encoder and row; c+P on the evaluation queries for every tau
+(descriptive, nothing is chosen on it); per kind, the directories holding it, the directories with a
+vector of it, the queries, the singletons and the mean number of directories x+F ranks; singletons
+per cell; vectors stored per directory (a_T: the kinds present with a vector).
+Expectation, written before the run, not a kill: the filter changes little for image and text
+queries, which nearly every folder holds, and more for pdf, table and other queries; H16a survives
+under all four encoders; H16b dies in M2 under most encoders (one vector is too coarse for a
+folder's many texts, as bc2 was); c+P gains in M1 and M2 and loses in P1 and P2.
+
+## Steps, in order
+1. Commit this brief, scripts/typeq.py and scripts/s16_run.sh before anything runs. typeq.py
+   passed a CPU test in the workspace on synthetic vectors in the S11 manifest's order: its a, c and
+   d ranks equal eval.py's on the same synthetic cache query for query, and its F, P and T ranks
+   equal a plain-loop recomputation on a sample (`--selftest`, which the pod run repeats on 200
+   evaluation queries per encoder). No session 16 number on a dirvec vector has been computed.
+2. Check the RunPod balance and the Claude limits. Resume bmao44n64ohrwp (MIG slice, $0.59 an hour,
+   3.4 vCPUs; CPU work only), run /workspace/setup_pod.sh, start scripts/pod_autostop.sh with a
+   deadline 2 hours after the resume and the markers /workspace/logs/s16/DONE and
+   /workspace/logs/s16/FAILED; verify its pid.
+3. `git pull` in the pod's clone, then `bash scripts/s16_run.sh` as a background job: environment
+   check, the four caches and ranks files present, typeq.py for E1 to E4 in turn with the
+   reproduction check and the self-test; it writes results/session16_outputs.md (outputs verbatim),
+   commits and pushes it, and writes DONE. A failed reproduction or self-test writes FAILED.
+4. Confirm the pod stopped. results/session16.md (this hypothesis block verbatim, the verdicts, the
+   secondaries) and the NOTES.md section, each as its own commit. The SIGIR version takes the
+   result; the preprint does not.
+
+## Inputs and budget
+- On the /workspace volume: the four S11 caches (vectors.npy, index.jsonl) and their ranks files,
+  the E1 venv (numpy, scikit-learn). Nothing is downloaded.
+- Expected: about 40 minutes (session 15's eval took 8 minutes on this pod with nine rows; typeq.py
+  rebuilds c once per query for the evaluation and the dev queries of each encoder), about $0.40.
+  The watcher caps it at 2 hours ($1.18). Balance read before the run.
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; tau is chosen on the dev queries by the rule above.
+- If the reproduction check or the self-test fails, stop: FAILED, no verdicts. If the pod cannot be
+  reached or a step fails, stop the pod and report; do not work around it.
+
+---
+
+# dirvec, session 17: is the minority-modality loss a fingerprint or creator artifact?
+
+Why this session exists. Ali asked on 2026-10-02 (08:43 Toronto) to continue the experiments and to
+choose the next step with independent agents rather than one judgment. Four advisors worked alone
+(three SIGIR reviewers, a literature and data scout, a practitioner and investor, a methodologist),
+and two judges who had not seen the deliberation scored their proposals on a fixed rubric. Both
+judges chose the same sequence: first the methodologist's validity checks (this session, CPU only,
+on the ranks already on the volume), then model-written folder abstracts against per-modality
+representatives (session 18). The checks come first because the methodologist found that file names
+alone, which no encoder sees, put the own folder of an S11 evaluation query in the top five 0.700 of
+the time (P1 0.617, P2 0.588; char 3-4-gram TF-IDF of base names, leave-one-out), level with the
+pooled E1 vector (0.692) and above E1's c in P2 (0.539). Leave-one-out own-folder retrieval may
+therefore reward record fingerprints (shared naming, sidecar files, digitization series) as much as
+content. Also: the S11 intervals resample directories, while about 47 effective creator families
+stand behind the P2 queries; 527 S11 records share a first creator with S5; and descq.py and
+typeq.py import eval.py, so no reproduction so far was independent. No c - a number has been
+computed on any subset defined below.
+
+## Definitions (fixed now)
+- Set: S11, the session 11 evaluation split (calibration seed 20261102), 17,140 queries, ranks from
+  sessions 11, 14 and 15 (data/emb/<cache>/ranks_s11_e1, ranks_s11_e2, ranks_s14_e3, ranks_s15_e4).
+  Nothing is embedded or re-ranked except by the independent re-implementation (below).
+- Family of a folder: the first creator of its Zenodo record in data/selection_s11.jsonl,
+  lowercased and stripped (1,814 families over the 2,597 folders).
+- Creator-clustered interval: 1,000 resamples of the cell's families with replacement (generator
+  seed: eval.py's cell seed plus 1000; cells all 1, P1 50, P2 51, M1 56, M2 57), the recall@5
+  difference recomputed over all queries of the resampled families; 95 percent percentile interval.
+  The point estimate is the plain difference over queries, as before. Family-weighted estimate
+  (secondary): the mean over families of each family's own difference, with the same resamples.
+- The directory bootstrap of scripts/validity.py must reproduce eval.py's published c - a intervals
+  in P1 and P2 under E1 to E4 exactly; if it does not, the run stops before any new number.
+- Filename-only baseline: char_wb 3-4-gram TF-IDF (sublinear tf) of the lowercased base name without
+  its last extension, fitted on the embedded files of the ranked folders; a folder's score is the max
+  cosine over its files' names, the own folder without the query file; rank as eval.py. "Names
+  miss" means rank above 5.
+- Same-stem sibling: another embedded file of the query's folder with the same lowercased stem and a
+  different extension (a figure and its PDF, an image and its JSON sidecar).
+- The four digitization series (named after an exploratory count of P2 queries, before any c - a
+  number on them): the families "digital humanities jena", "nona, dronova", "finnish museum of
+  natural history luomus, university of helsinki" and "royal botanic garden edinburgh".
+- Clean subset: queries the names miss, without a same-stem sibling, outside the four series.
+- Independent re-implementation: scripts/indep_eval.py, written on 2 October by an agent from a
+  written specification without reading eval.py, typeq.py, descq.py, xenc.py, selftest_ranks.py or
+  twostage.py. On the synthetic cache data/emb/synth16 it reproduced eval.py's a, c and d ranks for
+  all 17,091 queries. No real vector has been through it.
+
+## Hypotheses (fixed now, do not edit after the first run)
+H17a (the loss survives creator clustering): under each of E1 to E4, the creator-clustered 95
+percent interval of (c minus a) in recall@5 lies above zero in P1 and in P2 (all evaluation
+queries). Kill: dead under an encoder if either interval includes zero or lies below it. The paper
+keeps "under all four encoders" only if it holds under all four.
+H17b (the loss is not fingerprint matching): on the clean subset, under E1 and under E3, (c minus a)
+in recall@5 is at least +0.05 and its creator-clustered interval lies above zero, in P1 and in P2.
+Kill: dead if either condition fails in either cell under either encoder. E2 and E4 reported.
+H17c (the metric reproduces): indep_eval.py on the E1 cache gives, for rows a, c and d, recall@5 equal
+to eval.py's at three decimals in all, P1, P2, M1 and M2, and identical ranks for at least 99 percent
+of the queries of each row (a few exact ties between twin files in different folders may round
+differently). Kill: dead otherwise; then nothing else is read until the difference is explained.
+Secondary, reported, no kill: c - a on each component subset (names miss; no sibling; not the four
+series) and in M1 and M2; family-weighted estimates; families and effective families per cell; the
+filename-only baseline with its pooled form; c - d under clustering for E1 to E4 (does any interval
+fall entirely below -0.02, the within-0.02 claim); tb2c - c under E1 by the H11a rule under
+clustering; the E4 - E1 and E2 - E1 loss differences (H15c) under clustering, and the directory form
+checked against the published +0.189 and +0.265; the title and description queries (descq.py rerun
+with a new option that writes per-query ranks and changes no number; the E1 H12a statistic must
+reproduce +0.182 [+0.158, +0.206]): c - a on image-heavy and text-heavy folders under clustering, and
+on the title queries that a filename-only router misses; S3 and S5 under E1, clustered c - a, if
+their ranks files are on the volume.
+Expectation, written before the run, not a kill: H17a holds under all four (the effects are far from
+zero) but the P2 intervals widen; the loss shrinks on the clean subset and stays above +0.05 under E1
+and E3; H17c holds.
+
+## Decision rule for session 18 (fixed now)
+- H17a, H17b and H17c hold: session 18 is the judges' modified Proposal 3: one model-written abstract
+  per folder (an OpenViking-style L0 and L1 from captions and text heads, no digits, IDs, title or
+  description, file names cut to words) against a, c and d on title queries, plus member-description
+  queries written by a VLM outside the Qwen family with the target kept in its folder; caption-for-
+  image rows; BM25 and filename rows; creator-clustered intervals. Pre-registered after this session.
+- H17b dies: session 18 is the methodologist's member-description experiment as proposed, and the
+  paper's leave-one-out result becomes a robustness section.
+- H17c dies: stop; find and fix the difference before anything else.
+
+## Steps, in order
+1. Commit this brief, scripts/indep_eval.py, scripts/validity.py, the descq.py --dump-ranks option and
+   the driver scripts/s17_run.sh before anything runs. validity.py passed a test on the synthetic
+   cache (every section, the S3 and S5 light mode, and the H17c comparison).
+2. Check the RunPod balance and the Claude limits. Resume the MIG pod bmao44n64ohrwp, or one of the
+   identical MIG pods with the same volume (4ldg1eyjoupfme, gsnfcrhg4j1139, 31dj9o3kjbhwzc;
+   $0.59/h) if it has no free GPU. Run setup_pod.sh; start the watcher with a deadline 90 minutes
+   after the resume and the markers /workspace/logs/s17/DONE and FAILED.
+3. git pull, then bash scripts/s17_run.sh as a background job; it writes
+   results/session17_outputs.md, commits and pushes it, and writes DONE.
+4. Confirm the pod stopped. results/session17.md (this block verbatim, the verdicts, the
+   secondaries), NOTES.md, each as its own commit.
+
+## Inputs and budget
+- On the volume: the four S11 caches and ranks files, descq_s12.npz per cache, the E1 venv. Expected
+  about 20 minutes, about $0.20; the watcher caps it at 90 minutes ($0.89). Balance $17.48 at 12:45
+  UTC on 2 October. Claude weekly usage 86 percent at 13:24 UTC.
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; every subset, seed and threshold is fixed above.
+- If a reproduction check fails, stop: FAILED, no verdicts.
+
+# dirvec, session 18: written folder abstracts against per-modality representatives
+
+Why this session exists. Session 17's decision rule (H17a, H17b and H17c all held) makes session 18 the
+judges' modified Proposal 3. The SIGIR reviewers' likely sinker is that the cited directory systems do
+not route on a mean of file vectors: builders ship a model-written abstract per folder (OpenViking's
+L0 and L1, LlamaIndex, RAPTOR). This session puts such an abstract against a, c and d, on queries that
+are not files: the record titles (and title plus description), and one-sentence descriptions of single
+member images written by a model from another family, with the image kept in its folder. Ali asked for
+the run on 2 October, 10:55 Toronto ("run session 18"). No session 18 number has been computed.
+
+## Definitions (fixed now)
+- Set: S11 (2,597 folders, 25,990 files; E1 ok set 25,637). Every folder with an embedded file is a
+  candidate; folder representations use all of its embedded files (no leave-one-out), as descq.py.
+- Encoders: E1 and E3 (primaries), each with its own ok set and its S11 cache. Texts go through the
+  encoder's text path with mode "query" (the mode the S11 caches used for every text input; E3 has
+  one text path).
+- Generated texts (scripts/s18.py, prompts verbatim in the script; greedy decoding, seed 18, vLLM):
+  - Captions: every image and the first page (100 dpi) of every scanned PDF embedded under E1, by the
+    summarizer, from the load_rgb image cut to at most 602,112 pixels; two to four sentences.
+  - Text heads: the first 500 tokens (E1's Qwen2.5 tokenizer) of the text embed.py's prepare()
+    extracts, for every text-like file embedded under E1.
+  - L1 (primary abstract): one per folder from all its embedded files in manifest order (60 at most in
+    S11), each given as its kind, its name words (letter runs of the base name without the extension,
+    two letters or more; digits and separators split them) and its caption or text head. The model sees
+    no title, description, record ID or full file name. The prompt asks for at most 4,000 characters
+    of plain prose that covers every kind of file, images as well as documents, with no digits, codes,
+    identifiers or file names. L0: one sentence of at most 256 characters written from L1.
+  - With-names L1 (sw1, secondary): the same prompt with the full file names, names allowed.
+  - Post-processing: markdown marks removed, whitespace collapsed; in captions, L1 and L0 every token
+    containing a digit is removed; L1 and sw1 cut to 4,000 characters at the last sentence end past
+    2,000 characters (else at a space), L0 to 256 at a space.
+  - Summarizer: Qwen/Qwen3-VL-8B-Instruct; Qwen/Qwen2.5-VL-7B-Instruct if the first fails the smoke
+    test (10 images, every caption at least 10 characters). Revision recorded at download.
+  - Member descriptions: one sentence per image ("the way someone searching for it would describe
+    it", no digits, codes, identifiers or file names) by a model outside the Qwen family, the first of
+    mistral-community/pixtral-12b, HuggingFaceM4/Idefics3-8B-Llama3, llava-hf/llava-v1.6-mistral-7b-hf
+    that passes the same smoke test. Tokens with a digit and tokens equal to one of the image's own
+    name words (three letters or more) are removed. Images: every S11 evaluation query of cell P1
+    under E1 (image in a folder with image_frac below 0.5; 1,959) and 2,000 of cell M1 (image in a
+    folder with image_frac 0.5 or more), drawn without replacement with numpy default_rng(20261018).
+  - A model is replaced only before it has written anything; vLLM 0.11.0 first, the latest vLLM if no
+    describer passes under it.
+- Query sets: Q_title (2,597 record titles, the descq_s12.npz vectors), Q_desc (title and description,
+  secondary), Q_mem (the member descriptions; relevant folder: the image's own, which keeps the image).
+- Rows (recall@k of the relevant folder, rank 1 + the folders scoring strictly higher):
+  a, c, d as descq.py (uncentered); s1, s0, sw1: one vector, the abstract's embedding; s1c: c's
+  representatives plus s1; ta, tc, td: a, c, d with every image-input vector replaced by its caption's
+  embedding (a file without a caption keeps its vector); bm25: Okapi BM25 (k1 1.2, b 0.75, lowercased
+  word tokens, unique query terms) over each folder's full file names, captions and text heads, the
+  lexical ceiling on the abstract's evidence; fn: char_wb 3-4-gram TF-IDF of base names, the folder's
+  max cosine (validity.py's title mode). In bm25 and fn a relevant folder that scores zero is a miss.
+- Cells: Q_title and Q_desc: all, text-heavy (image_frac below 0.5), image-heavy (0.5 or more);
+  Q_mem: P1, M1.
+- Intervals: creator-clustered (validity.boot_mean: 1,000 resamples of first-creator families,
+  query-weighted), seeds: Q_title 1801 all, 1802 text-heavy, 1803 image-heavy; Q_desc 1811 to 1813;
+  Q_mem P1 1850, M1 1856. Secondary subsets: one folder per family (drawn with default_rng(20261019)),
+  the four digitization series of session 17 apart.
+- Reproduction check: the a, c and d ranks on Q_title and Q_desc must equal the descq.py ranks dumped
+  in session 17 (/workspace/logs/s17/descq_ranks_e1.jsonl, _e3.jsonl) for every query; otherwise the
+  run stops before any new number.
+
+## Hypotheses (fixed now, do not edit after the first evaluation)
+H18a (titles, image-heavy folders: written abstract against per-modality representatives): under E1
+and under E3, s1 - c in recall@5 on Q_title, image-heavy cell, with its clustered interval. Three
+outcomes fixed in advance, per encoder: "above c" (s1 - c at least +0.05 and the interval above zero),
+"below c" (at most -0.05 and the interval below zero), "between" (otherwise). What the paper says:
+above c, a written abstract beats per-modality vectors for whole-folder text search and c's claim is
+confined to member-level queries; below c, c beats the builders' abstract on titles as well; between,
+no difference of practical size on titles. If E1 and E3 disagree the paper reports a split.
+H18b (member descriptions of minority images): under E1 and under E3, on Q_mem cell P1, gated on d
+reaching recall@5 0.25 (below the gate the descriptions do not find their own image and H18b is not
+testable under that encoder). It survives under an encoder if both c - s1 and c - a are at least
++0.05 with clustered intervals above zero; dead if either fails. The paper keeps "a written abstract
+loses the minority image as the pooled vector does" only if it survives under both.
+Secondary, reported, no kill: every row in every cell at recall@1, 5 and 10; s0 and sw1 against s1;
+s1c against c and s1; d - c; the caption rows (ta - a: what removing the modality gap recovers; tc -
+ta: what is left for dilution; tc - c, td - d); bm25 and fn against s1 (Q_title) and c (Q_mem); M1 as
+the majority control; Q_desc; the one-folder-per-family subsample and the four series.
+Expectation, written before the run, not a kill: on titles s1 is at least level with c (a written
+abstract is text and so is the title), likely "above c" under E1; on P1 descriptions c - a holds as
+in every leave-one-out run and c - s1 is positive but smaller, because an abstract of a text-heavy
+folder will often not mention a minority image.
+
+## Steps, in order
+1. Commit this brief, scripts/s18.py and scripts/s18_run.sh before anything runs. s18.py passed a CPU
+   test on a synthetic tree with stand-ins for the models (every subcommand; the reproduction check
+   catches a changed rank; its a, c and d equal descq.py rank for rank on that tree).
+2. Check the RunPod balance and the Claude limits (15:03 UTC: $17.42; weekly 90 percent, resets
+   4 October 06:00 UTC). Resume a full RTX PRO 6000 pod with the volume (87euwc629ejvph, 50 GB
+   container disk; else 3m5g5g80psfwnm, 40 GB). Run setup_pod.sh; start the watcher with a deadline
+   4.5 hours after the resume and the markers /workspace/logs/s18/DONE and FAILED.
+3. git pull, then bash scripts/s18_run.sh as a background job: text heads in the background; vLLM
+   venv; member descriptions (the describer's smoke test is the vLLM check on this card); captions
+   and abstracts; E1 and E3 embeddings; eval under E1 and E3; outputs (results/session18_outputs.md
+   and the generated texts in data/s18/) committed and pushed; DONE.
+4. Confirm the pod stopped. results/session18.md (this block verbatim, the verdicts, the secondaries),
+   NOTES.md, each as its own commit.
+
+## Inputs and budget
+- On the volume: the S11 corpus, the E1 and E3 caches with descq_s12.npz, the E1 ranks file, the
+  session 17 descq rank dumps, the E1 venv and weights. New on the container disk: a vLLM venv, the
+  summarizer and describer weights (deleted after each stage), E3's weights. Expected 2.5 to 3 hours
+  at $2.09/h, $6 to $7; the watcher caps it at 4.5 hours ($9.41).
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; models, prompts, seeds and thresholds are fixed above.
+- If the reproduction check fails, stop: FAILED, no verdicts.
+
+---
+
+# dirvec, session 20: per-modality representatives in a metadata field of fixed size
+
+Why this session exists. A folder vector is for a folder's metadata: it is read before any file in
+the folder, and the field holds a fixed number of bytes. Ali, 2 October 2026, 18:28 and 18:33
+Toronto: the only reason for a folder vector is space in metadata fields and that it can be reached
+before the files; the idea is metadata allocations in file systems that take up to 64 kilobits, on
+the modern operating systems where consumer-grade models run. The draft counts c in vectors (about
+five per folder), and at the encoders' float32 sizes five vectors are 15 to 40 KiB. This session
+counts bytes: it stores every representative in five formats, from float32 down to one bit per
+dimension, and asks whether c in a few KiB still does what it does in float32. CPU only, on the S11
+caches already on the volume; no new embedding. Numbered 20 because 19 is the proposed GitHub second
+source (NOTES.md), not registered.
+
+## Definitions (fixed now)
+- Set, queries, encoders: S11, the session 11 evaluation queries (calibration seed 20261102), E1 to
+  E4 with their S11 caches; leave-one-out as eval.py; the cells all, P1, P2, M1 and M2 with
+  eval.py's seeds (1, 50, 51, 56, 57).
+- Formats (scripts/quant.py), per stored vector: f32 (4 bytes per dimension, the vector unchanged),
+  f16 (2), int8 (1 byte per dimension: round(127 x / max|x|) per vector, the scale not stored), int4
+  (half a byte: round(7 x / max|x|)), bin (one bit: +1 where x >= 0, else -1). Every format but f32
+  is decoded to float32 and unit-normalised; the query stays float32 (it is embedded at search time)
+  and a folder's score is the largest cosine over its stored representatives.
+- Rows: a_f, c_f and d_f for each format f: eval.py's a, c and d with every representative stored in
+  f, the own folder rebuilt without the query and then stored. d_f32 is eval.py's d, the reference:
+  every file of every folder opened.
+- Bytes per folder: representatives times bytes per vector, over the 2,597 folders ranked, from all
+  their embedded files. Dimensions E1 2,048, E2 1,024, E3 1,536, E4 768, so one vector is 8,192,
+  4,096, 6,144 and 3,072 bytes in f32 and 256, 128, 192 and 96 in bin. From the manifest (before
+  skipped files) c has 5.28 representatives per folder on average, 9 at the 95th percentile and 14
+  at most; d has 10.0 files on average and 60 at most.
+- Budgets: 2, 4, 8, 16 and 64 KiB per folder. 8 KiB is the 64 kilobits Ali named; 64 KiB is
+  Linux's ceiling for one extended attribute value; 4 KiB is one ext4 block, which with the inode's
+  spare space holds all of a file's extended attributes unless the ea_inode feature is on; 2 KiB is
+  S3's allowance for user metadata. For each budget the outputs name the most precise format in which
+  every folder fits, for a, c and d.
+- Reproduction check: the f32 ranks of a, c and d must equal eval.py's in the session 11 ranks files
+  (ranks_s11_e1, ranks_s11_e2, ranks_s14_e3, ranks_s15_e4) for every query; otherwise exit 3, FAILED,
+  no numbers. Self-test: 200 evaluation queries per encoder (default_rng(20)), every row recomputed in
+  float64; a rank that differs and is not explained by scores within 1e-5 of the own folder's is a
+  failure (exit 4).
+
+## Hypotheses (fixed now, do not edit after the first evaluation)
+H20a (one byte per dimension): under each of E1 to E4, no paired 95 percent interval of
+(c_int8 - d_f32) in recall@5 over all queries, P1, P2, M1 or M2 lies entirely below -0.02 (H15b's
+rule). Dead under an encoder if any of the five does.
+H20b (one bit per dimension): the same for (c_bin - d_f32). Dead under an encoder if any of the five
+intervals lies entirely below -0.02.
+H20c (one bit per dimension still keeps the minority modality): under each encoder, the paired
+interval of (c_bin - a_f32) in recall@5 lies above zero in P1 and in P2. Dead under an encoder if
+either includes zero or lies below it.
+What the paper says: where H20b survives, c fits in the bytes the bin row of the bytes table gives
+and still routes within 0.02 of opening every folder; where only H20a survives, the claim is one
+byte per dimension at the budget its row gives; where H20c survives, one bit per dimension of c
+beats one float32 vector of a on the minority files.
+Secondary, reported, no kill: every row at recall@1, 5 and 10 in every cell; the cost of each format
+(c_f - c_f32, a_f - a_f32, d_f - d_f32); c_f - a_f and c_f - d_f at equal precision; the lower bounds
+against -0.02 (the stricter non-inferiority reading); the bytes table (mean, 95th percentile, max,
+share of folders within each budget) for a, c and d; the budget table.
+Expectation, written before the run, not a kill: int8 costs nothing measurable (c_int8 within 0.005
+of c_f32 in every cell); one bit costs more at 768 dimensions (E4) than at 2,048 (E1), and H20b may
+fail in a minority cell under a dual tower; H20c survives under all four, since c - a was 0.16 to
+0.50 in the minority cells.
+
+## Steps, in order
+1. Commit this brief, scripts/quant.py and scripts/s20_run.sh before anything runs. quant.py passed a
+   CPU test in the workspace on synthetic vectors (96 dimensions) for a 300-folder subset of S11 in
+   manifest order: its f32 a, c and d ranks equal eval.py's query for query (1,997 queries) and the
+   float64 self-test passed on 150 of them. No session 20 number on a dirvec vector has been
+   computed.
+2. Check the RunPod balance. The Claude weekly limit was close to its end on the evening of
+   2 October (it resets 4 October 06:00 UTC), so the run is one launch and the watcher stops the pod
+   if this conversation is cut off. Resume bmao44n64ohrwp (MIG slice, $0.59 an hour, 3.4 vCPUs), run
+   /workspace/setup_pod.sh, start scripts/pod_autostop.sh with a deadline 2 hours after the resume
+   and the markers /workspace/logs/s20/DONE and /workspace/logs/s20/FAILED; verify its pid.
+3. `git pull` in the pod's clone, then `bash scripts/s20_run.sh` as a background job: environment
+   check, the four caches and ranks files present, quant.py for E1 to E4 in turn with the
+   reproduction check and the self-test; it writes results/session20_outputs.md (outputs verbatim),
+   commits and pushes it, and writes DONE.
+4. Confirm the pod stopped. results/session20.md (this hypothesis block verbatim, the verdicts, the
+   secondaries) and the NOTES.md section, each as its own commit.
+
+## Inputs and budget
+- On the /workspace volume: the four S11 caches and their session 11 ranks files, the E1 venv
+  (numpy, scikit-learn). Nothing is downloaded.
+- Expected: about 40 minutes (session 16 rebuilt c per query on the same pod; quant.py adds 15
+  products per encoder), about $0.40. The watcher caps it at 2 hours ($1.18).
+
+## Rules
+- One commit per deliverable. No em dashes in anything written.
+- Nothing is chosen on the evaluation queries; formats, budgets and rules are fixed above.
+- If the reproduction check or the self-test fails, stop: FAILED, no verdicts. If the pod cannot be
+  reached or a step fails, stop the pod and report; do not work around it.
+
+---
+
+# dirvec, session 19: the minority-modality loss on a second source (directories of GitHub repositories)
+
+On 4 October 2026 three reviewers read the SIGIR version blind and all three recommended reject
+(reports/panel_2026-10-04.md). They named the same first fix: a pre-registered replication on a
+second, structurally different source, with folders people built for their own work, real nesting,
+folders not selected one by one, owner-clustered inference, a name-only baseline, and queries not
+derived from folder membership. This session is that replication. Its design takes the conditions
+the reviewers set when they were shown a first plan (same report): primary cells that keep a
+same-modality sibling, an owner-weighted estimator, a smallest effect of interest, a strict margin
+only where c is a real compression, source code reported apart, and a timestamp from outside the
+repository. Everything below is fixed before any repository is listed.
+
+## Definitions (fixed now)
+- Frame. Days are drawn uniformly without replacement from 2016-01-01 to 2025-12-31 (a shuffle of
+  all days, seed 20261104, read in that order). For a drawn day the pool holds every public
+  repository created that day with at least five stars, as the GitHub search API returns it without
+  a token; an interval with more than 1,000 results is halved until it has at most 1,000. A
+  repository is usable when it is not a fork, has a default branch, is at most 200 MB by the API's
+  size field, and carries one of these licences as GitHub reports it: MIT, Apache-2.0, BSD-2-Clause,
+  BSD-3-Clause, ISC, Unlicense, CC0-1.0, CC-BY-4.0, 0BSD. Days are read until the pool holds 3,000
+  usable repositories, and 2,500 more per round (at most six rounds) if the scored set is not full.
+- Folder. A directory of a repository at any depth, with its direct children only, read from the
+  tarball of the default branch (pinned by the commit id in the tarball). Directories under a path
+  component that starts with a dot, or under node_modules, vendor, third_party, bower_components,
+  site-packages, Pods or __pycache__, are not listed. Kept files: the extension table and the 25 MB
+  cap of session 1 (scripts/fetch.py), not empty, name not starting with a dot. Source code is text
+  under that table. A directory is eligible with 3 to 100 kept files and at most 100 MB. It is mixed
+  when it keeps at least one file with an image extension and at least one other kept file.
+- Scored set. Usable repositories are read in a seeded random order. Every eligible directory of a
+  repository that is read is listed in data/ghdirs_s19.jsonl, drawn or not, and the share of mixed
+  directories is reported from that list. From each repository the scored set takes at most two
+  mixed and at most two other eligible directories, drawn at random with a seed fixed by the
+  repository's id, until it holds 1,000 mixed and 600 other directories or 24,000 files. Mixed
+  directories are over-sampled on purpose, and the natural rate is the one in the list.
+- Ground truth, near-duplicate rules, input rules, rows, scoring: unchanged (build_gt.py, embed.py,
+  eval.py). Rows a, ac, c, cc, d, dc, tb2c, tbc, and one new row cs: per-modality k-means with
+  k = min(n, max(3, ceil(sqrt(n)))) per label. The eval.py command line is session 11's with those
+  rows and calibration seed 20261104 (the 20 percent calibration directories give no file queries).
+- Encoders. E1 decides every hypothesis. E4 and then E2 run if the balance allows and are read by
+  the same rules, reported, with no verdict of their own. E3 is not run in this session.
+- Cells. P1, P2, M1, M2 as in session 3. P1s and P2s are the queries of P1 and P2 whose folder
+  still holds at least one other embedded file of the query's input group once the query is left
+  out. A lone image among texts has no sibling to be found through under any row, so it cannot show
+  what pooling loses. The full cells are reported beside them.
+- Owner: the account that holds the repository, lowercased. Estimator of every registered test:
+  the mean over owners of the owner's mean over its queries. Interval: percentile, 10,000 resamples
+  of owners. A test with fewer than 100 owners is inconclusive.
+- Reading of a loss x - y on an interval [L, U]: confirmed if L is at least +0.05; below +0.05 if U
+  is under +0.05; present with the size open if L is above zero; inconclusive otherwise.
+- Clean subset: both file-name routers of session 17 (max over names, pooled names) miss the folder
+  at rank 5, and the folder holds no file with the query's stem and another extension.
+- Kinds, for reporting only: image, code (py r jl m c h cpp hpp java js ts sh sql lean ipynb rmd
+  qmd), config (json xml yaml yml toml ini cfg log cff bib), table, prose (every other text-like
+  file). A no-code folder holds no code file.
+- Commit-subject queries. From the history of each repository (the 3,000 newest commits reachable
+  from the pinned commit, no merges, no author data): a commit qualifies for a scored directory
+  when every path it changed lies directly in that directory and at least one is a kept file of it.
+  The query is the subject line with every token removed that holds a slash or backslash, equals
+  the name or stem of a kept file of the directory, or ends in an extension of the study's table.
+  Dropped: subjects that start with "merge " or "revert ", that equal "add files via upload",
+  "initial commit" or "first commit", or that keep fewer than four words of three or more letters;
+  repeated texts within a directory. At most the three newest per directory. The relevant folder is
+  that directory; representations use all of a directory's embedded files; all scored directories
+  are ranked.
+
+## Hypotheses (fixed now, do not edit after the first harvest)
+Primary family, three tests, each read on its 98.33 percent interval (Bonferroni over the three):
+- H19a. Under E1 on the evaluation queries, c minus a in P1s and in P2s. Confirmed if both cells
+  are confirmed. Replicated with the size open if both are confirmed or present. Not replicated at
+  the registered size if either cell is below +0.05. Inconclusive otherwise.
+- H19c. Under E1, on the queries whose folder c does not hold whole (a label keeps more than three
+  files once the query is left out), c minus d. Not inferior if L is at least -0.02; inferior if U
+  is under -0.02; inconclusive otherwise.
+Secondary, with a registered reading on the 95 percent interval:
+- H19b. The H19a statistic on the clean subset of P1s and of P2s, read as a loss.
+- H19d. With the commit subject as the query, c minus a on image-heavy directories (image fraction
+  at least 0.5), read as a loss. Gate: file-level search d reaches recall@5 of at least 0.10 on
+  those queries and more than the file names alone. If the gate fails the test is untestable.
+- The H19a statistic on no-code folders; on all of P1 and of P2; cs minus d where c differs from d.
+Reported without a reading: the directory bootstrap and the query-weighted owner-clustered
+intervals of every difference; the file-name baseline; the cells by kind of the query file; by
+folder size (3 to 10, 11 to 30, 31 to 100 embedded files), by the number of same-group siblings
+left, by depth in the repository; c minus tbc (the H9c question on this source), tb2c minus c,
+centering; the modality gap and same-folder cosines; recall@1, @3 and @10; the rate of mixed
+directories by depth and size; E4 and E2 by the same rules and their loss against E1's.
+
+## What each outcome will mean for the paper (fixed now)
+- H19a confirmed or replicated: the loss holds on a second source whose folders, owners, images and
+  texts differ from Zenodo's, with the sizes this session gives. The paper reports both sources.
+- H19a not replicated at the registered size: the paper says so in the abstract, gives the Zenodo
+  sizes as sizes on Zenodo records, and reports the registered breakdowns (siblings, kinds, names,
+  d's level) as the place to look for the reason. No breakdown is promoted to a result.
+- H19c inferior: three representatives per label are not enough for larger folders, and the paper
+  says so and reports cs.
+- Inconclusive is reported as inconclusive.
+
+## Steps, in order
+1. This brief, scripts/fetch_gh.py, scripts/s19.py, scripts/s19_run.sh and the self-test
+   scripts/s19_selftest.py (synthetic repositories behind a local stand-in for the API; it runs the
+   whole pipeline) in one commit. An OpenTimestamps proof of that commit's id in prereg/, committed
+   next, before the harvest.
+2. One run of scripts/s19_run.sh on a pod: pool, harvest, manifest, ground truth, history, the
+   commit-subject query set, the corpus counts; the corpus files are pushed before any embedding.
+   Then E1: embedding, eval.py, the commit-subject queries, s19.py validity. Then E4 and E2.
+3. results/session19_outputs.md (verbatim, pushed by the pod), results/session19.md (hypotheses
+   copied from here, verdicts, reading), NOTES.md with a list of deviations: what this brief said,
+   what was done, why, which numbers had been seen.
+
+## Inputs and budget
+- RunPod balance $12.87 on 4 October 2026; nothing is bought. Expected $5 to $9.
+- No GitHub token is needed. If the pod's address is refused by the search API, the pod's stored
+  credential for this repository is used for the search requests only.
+
+## Rules
+- Ask Ali only at walls. One commit per deliverable. No em dashes.
+- Nothing is selected on the new corpus. s19.py validity stops before any new number if it does not
+  reproduce eval.py's printed intervals.
+- A step that fails is fixed and resumed (S19_RESUME=1); a number seen before a fix is listed among
+  the deviations.
+
+## Amendments before the harvest (4 October 2026, night; no repository has been listed)
+The run was read once more before it started. The definitions, cells, tests and readings above are
+unchanged. Code only:
+- scripts/fetch_gh.py. The file budget counts as reached when fewer than three files of it are left,
+  since no eligible directory can then fit (before, a budget one or two files short was never "full"
+  and the harvest would have read the rest of the pool for nothing). A rate limit of the search API
+  is waited out up to 40 times a query instead of 12, and a tarball is tried six times instead of
+  four. Any error while a tarball is read makes that repository a failed one instead of stopping the
+  harvest. A directory whose files do not all come out of the tarball is left out and counted.
+  Commit history is fetched without a stored credential and without a prompt.
+- scripts/s19_run.sh. It stops if more than 10 percent of the repositories read gave no tarball
+  (throttling or network), because the draw would then not be the registered one. Before anything
+  is embedded it checks that every file of the manifest is on the disk, and rebuilds the corpus from
+  the selection by commit id if not (a stopped pod loses its container disk, and embed.py would
+  count a missing file as a skipped input). After the outputs are pushed it runs
+  scripts/s19_followup.sh if a later commit has added one; a follow-up is registered in its own
+  section of this file before it runs and cannot change a session 19 output.
+- scripts/s19_preflight.sh (new). On the pod before the run: the tools, the self-test in the pod's
+  own Python, and the real endpoints on a throwaway draw (seed 7, one day, nine directories, files
+  with the suffix _p19, removed afterwards). It computes no retrieval number.
+An OpenTimestamps proof of this commit's id is in prereg/session19_amend_commit.txt.ots.
+
+---
+
+# dirvec, session 21: what to store in a fixed number of bytes of a folder's metadata (both sources)
+
+Why this session exists. The reviewers of 4 October (reports/panel_2026-10-04.md) agreed on a second
+objection after the second source: the loss compares one stored vector with about five, so pooling
+is confounded with budget. They asked for the budget in bytes, for matched baselines at equal bytes
+(sampled files, medoids, farthest-first, one mean per kind, every file at one bit when it fits), and
+for a summary that can be maintained, which k-means representatives are not and a mean is. Session
+20 stored a, c and d in five formats. This session fixes the bytes instead and asks which summary to
+put in them. CPU only, on cached vectors: the S19 caches of the run now on the pod and the S11
+caches on the volume.
+
+When this was fixed. Committed on 5 October 2026 while the session 19 pod (started 01:52 UTC) was in
+its harvest: no file of the new source had been embedded and no retrieval number of it existed.
+Seen of the new source by then: the pool counts (7,959 repositories, 3,080 usable, 8 days), the
+harvest counters of its first round (3,080 repositories read: 707 mixed and 600 other directories,
+9,997 files) and of the start of its second (771 mixed), and the preflight's throwaway draw (seed 7:
+12 of 81 eligible directories mixed, 77 files embedded by each encoder, no retrieval number). S11 is another matter: sessions 9, 13 and 20 scored blind k-means at
+c's budget and a, c and d in five formats on it, so S11 is reported here as the earlier source and
+no hypothesis is read on it.
+
+## Definitions (fixed now)
+- Sets and encoders. S19: session 19's manifest, ground truth, evaluation queries (calibration seed
+  20261104) and caches; E1 decides, E4 and E2 are run if session 19 embedded them. S11: session 11's
+  evaluation queries (calibration seed 20261102) under E1 to E4. Leave-one-out, scoring and ranks as
+  eval.py: the float32 query against what the folder stores, the folder's score its largest cosine,
+  the rank 1 plus the folders scoring strictly higher; the query's own folder is rebuilt without the
+  query and then stored.
+- Budgets: 512 bytes, 1, 2, 4 and 8 KiB per folder. A vector at one bit per dimension takes
+  ceil(dim / 8) bytes (E1 256, E2 128, E3 192, E4 96), so a budget of B bytes holds
+  n = B // ceil(dim / 8) of them. A folder with at most n embedded files is stored whole, all its
+  files at one bit, by every policy but mean, kindmean and fsample.
+- Policies (scripts/budget.py), each within B bytes:
+  mean: the pooled mean (eval.py's a) in the most precise of f32, f16, int8, int4 and bin that fits
+  (session 20's formats).
+  kindmean: one mean per kind (eval.py's b), all in the most precise format in which they fit
+  together; when one bit each does not fit, the kinds with the most files are kept.
+  sample: n files at one bit. The n are dealt to the kinds present one at a time, the kind with the
+  most files first (ties in eval.py's order of the labels); a kind keeps its files with the smallest
+  hash priority, sha1 of "21:" and the file's manifest path. The sample is fixed by the file names,
+  needs no clustering, and every stored vector is a file's own.
+  fsample: the same with a fixed share: every kind present keeps its n // kinds files of smallest
+  priority and unused slots stay empty (below one slot a kind, the n kinds with the most files keep
+  one file each). It merges exactly whenever n is at least the number of kinds: a parent's fsample
+  is then computed from its children's without opening a file.
+  usample: the n files with the smallest hash priority, kinds ignored, one bit. It merges exactly:
+  the bottom-n of a union is the bottom-n of the two bottom-n samples. sample, which refills unused
+  slots, does not merge exactly.
+  ffirst: n files by farthest-first traversal from the file nearest the mean, one bit.
+  kmeans: min(n, files) centroids of spherical k-means over all files, one bit.
+  medoid: for each of those clusters the member nearest its centroid, one bit; members within 1e-6
+  of the nearest tie and the first in manifest order is taken.
+  kkind: the allotment of sample; each kind's files reduced to its allotment by k-means, one bit.
+  allbits: every file at one bit on its first m dimensions, m = min(dim, 8 (B // files)); the query
+  is cut to the same m dimensions and renormalised. It relies on the leading dimensions carrying
+  the most, which E1 and E2 were trained for and E3 was not; reported as measured.
+  A kind is the manifest's modality label. k-means here is spherical, in kernel form on the folder's
+  cosine matrix, seeded by farthest-first traversal, at most 25 Lloyd steps, no random number; it is
+  not eval.py's k-means, so kkind at three per kind is not c, and c's ranks are taken from eval.py's
+  ranks file as a reference row. sample and usample are run again under the hash seeds 22 to 25 and
+  the spread over the five seeds is reported; the tests read seed 21.
+- Cells. all: every evaluation query. minority: P1s and P2s of session 19 together, an image query
+  in a text-heavy folder or a text-like query in an image-heavy folder that still has a sibling of
+  its input group. Not whole, at a budget: the queries whose folder holds more than n embedded files
+  besides the query, so that what is stored is a strict subset of the folder. P1s, P2s, M1 and M2
+  beside them, and the folder sizes 3 to 10, 11 to 30 and 31 to 100 embedded files.
+- Estimator on S19: session 19's, the mean over owners of the owner's mean, percentile intervals
+  from 10,000 resamples of owners; a test with fewer than 100 owners is inconclusive. On S11:
+  query-weighted with 1,000 resamples of the cell's directories, as eval.py.
+- Checks before any number: the mean in f32 must give eval.py's rank_a and every file in f32 its
+  rank_d for every query; a difference is accepted only where a folder scores within 1e-5 of the
+  own folder, and is counted; otherwise exit 3 and no output. The registered run stops before any
+  number if a directory row has no owner or the budgets are not the ones above.
+  scripts/s21_selftest.py recomputes every policy at every budget from the vectors with a second,
+  plain implementation (explicit centroids, loops) on a synthetic set with files and whole folders
+  without vectors, and must pass on the pod before the runs.
+- Read before the commit by a reviewer who had not seen the code (a separate instance, given the
+  brief and the scripts). Changed on its findings, before any number: the three tests moved to the
+  queries whose folder is not whole (H21a had been on all minority queries); the rows beside the
+  tests lost their readings; near-ties are bounded; the recall tables gained owner-weighted columns;
+  fsample is compared with usample; the hash seeds are reported in the restricted cells; the driver
+  refuses other budgets and reports a registered run that did not finish.
+
+## Hypotheses (fixed now, do not edit after the first evaluation of S19)
+One family, three tests, under E1 on S19 at 2 KiB (S3's allowance for user metadata, half an ext4
+block; under E1 eight one-bit vectors against the mean in int8), each read on its 98.33 percent
+interval. All three are read on queries whose folder is not whole at 2 KiB, where what is stored is
+a strict subset of the folder: a folder stored whole is every file at one bit under sample, kmeans
+and usample alike, which session 20 already compared with the mean, and counting those queries
+would pull the two differences between samples to zero.
+- H21a, the bytes are better spent on a few coarse file vectors than on one precise mean: sample
+  minus mean on the minority queries whose folder is not whole, read as session 19 reads a loss
+  (confirmed if the lower bound is at least +0.05; below +0.05 if the upper bound is under it;
+  present with the size open if the lower bound is above zero; inconclusive otherwise).
+- H21b, the sample needs no clustering: sample minus kmeans over all queries whose folder is not
+  whole. Not inferior if the lower bound is at least -0.02; inferior if the upper bound is under
+  -0.02; inconclusive otherwise.
+- H21c, the kinds: sample minus usample on the minority queries whose folder is not whole. The kinds
+  matter if the lower bound is above zero; the uniform sample is better if the upper bound is below
+  zero; no difference at the margin if the interval lies within -0.02 and +0.02; inconclusive
+  otherwise.
+Reported beside each test, without a reading: the same difference on the cell without the
+restriction (all minority queries for H21a and H21c, all queries for H21b), and the test's own
+difference with near-ties counted for the own folder and against it. A near-tie is a folder scoring
+within 1e-6 of the query's own folder; the study's rank counts only folders scoring strictly higher,
+which favours a summary made of files' own vectors when another folder holds a copy of the same
+file, so both bounds are printed with the share of queries they move.
+Reported without a reading: every policy at every budget, in every cell and size class, on both
+sources and under every encoder run, owner-weighted on S19 in the cells the tests use; kmeans,
+kkind, medoid, ffirst, allbits, kindmean and fsample against mean, sample, usample and one another
+at equal bytes; the distance of sample to every file opened in f32; the share of folders stored
+whole and the bytes each policy uses; the two samples and their difference under five hash seeds, in
+the restricted cells too.
+Expectation, written before the run and not a test: H21a confirmed; H21c the kinds matter, because a
+uniform sample of eight from a folder of thirty usually misses its three images; H21b open at 2 KiB,
+where a sample of a large folder covers its majority worse than centroids do; fsample below sample
+in small folders, where it leaves slots empty.
+
+## What each outcome will mean for the paper (fixed now)
+- H21a confirmed or present: at equal bytes a handful of files at one bit keeps the minority files
+  findable where the mean in its best format does not. The remedy is how the bytes are spent, and
+  the paper gives the table by budget. Below +0.05 or inconclusive: the paper says the advantage at
+  equal bytes was not shown on the second source.
+- H21b not inferior: the summary the paper recommends is a sample of the files' own vectors at one
+  bit, which needs no clustering. Inferior: the paper says what clustering buys at that budget and
+  that a summary made of files' own vectors pays it.
+- H21c the kinds matter: the remedy keeps "per kind" in its name, and a summary that merges up a
+  tree has to be fsample, at the price its rows against sample and usample show. No difference: the
+  paper says the labels are not needed and the uniform sample, which merges exactly, is the
+  recommendation. The uniform sample better: reported as such.
+- Inconclusive is reported as inconclusive. No row is promoted to a result after the fact.
+
+## Steps, in order
+1. This brief, scripts/budget.py, scripts/s21_selftest.py and the driver scripts/s19_followup.sh in
+   one commit, with an OpenTimestamps proof of its id in prereg/, before session 19's first
+   evaluation. scripts/s19_selftest.py keeps its synthetic set when S19_KEEP is set, nothing else in
+   it changes.
+2. The session 19 driver runs scripts/s19_followup.sh after its outputs are pushed: the self-test,
+   then budget.py on S19 under E1 (the registered tests), S11 under E1, S19 under E4 and E2, S11
+   under E4, E2 and E3. results/session21_outputs.md, verbatim, is pushed after the two E1 runs and
+   again at the end.
+3. results/session21.md (this hypothesis block copied, verdicts, reading) and NOTES.md.
+
+## Inputs and budget
+- Nothing is downloaded or embedded. About ten minutes a run on the pod's three cores, seven runs,
+  under $1 of the balance already there.
+
+## Rules
+- Nothing is chosen on the new corpus: budgets, policies, the registered budget and the readings are
+  fixed above. A run that fails its reproduction check gives no numbers.
+- One commit per deliverable. No em dashes.
+
+---
+
+# dirvec, session 22: a folder's summary written to a real file system and read back
+
+Why this session exists. All three reviewers of 4 October wrote that the setting is never built: "no
+vector was written to a file system". One of them named the smallest experiment: lay the set out on
+ext4, write the summary to an attribute, and count what a reader fetches against per-file
+attributes, a sidecar file and a central index, with the cost of a change; the adviser added that
+blocks should be counted and not milliseconds on a shared machine, and that the paper must say where
+a central index wins. This session does that. It measures the store and nothing else: no vector is
+computed, no folder is ranked, and no hypothesis of the study is read on it.
+
+## Protocol (fixed now, before the real trees are laid out)
+- Trees: the first 300 repositories in the order of data/ghdirs_s19.jsonl.gz (session 19's list of
+  every eligible directory of every repository it read) that hold 5 to 400 eligible directories. A
+  tree is those directories with their paths, their ancestors, and as many files in each as it has
+  kept files. Every directory, eligible or an ancestor, gets a summary of B bytes; the bytes are
+  random, since their values do not change what is read. Every file is one block of random data.
+- Where a summary can live: an extended attribute of the directory (attr); a file inside the
+  directory (sidecar); one index file at the root of each tree, a table of paths and offsets
+  followed by the summaries (tree); one such file for the whole volume (global); and no folder
+  summary at all, each file carrying its own 256-byte vector in an attribute and the reader fetching
+  the vectors of a directory's files (files, on 256-byte and on 1,024-byte inodes).
+- Budgets: 2,048 bytes; 4,000 bytes, about what one ext4 attribute block holds; 8,192 bytes, which
+  ext4 stores as an attribute only with its ea_inode feature. One ext4 image per layout and budget
+  (mke2fs defaults otherwise, 4 KiB blocks), on a loop device.
+- Counting: the sectors the kernel reads from and writes to the image (/sys/block/<loop>/stat), in
+  blocks of 4 KiB, after an unmount and a mount before every measurement. Reported twice: with
+  readahead off (inode_readahead_blks=0 and read_ahead_kb=0), so that only the blocks asked for are
+  counted, and with the kernel's readahead as shipped.
+- What is measured: a scan (every directory of every tree visited and its summary fetched); 400
+  descents (a tree and one of its eligible directories drawn with seed 20261105; the reader starts
+  at the tree's root, lists the directory, fetches the summary of every child directory, steps into
+  the child on the way and repeats until the target is listed), each beside the same walk without
+  the summaries, the difference being what the summaries cost; 40 updates (one directory's summary
+  replaced: blocks written by sync and by unmount); and whether a directory's attribute survives
+  cp, tar, git and mv.
+- Reported as measured, on one kernel and one file system: the table per layout and budget. The
+  paper says in which layout the reader fetches the fewest blocks, including where that is the
+  packed index and not the attribute.
+
+## Steps
+1. This section and scripts/store.py (tested on a synthetic list of 13 trees) in one commit.
+2. One run for each readahead setting in the workspace (root, loop mounts; no pod, no cost) once the
+   session 19 pod has pushed data/ghdirs_s19.jsonl.gz: results/session22_outputs.md, verbatim.
+3. results/session22.md and NOTES.md.
+
+---
+
+# dirvec, session 23: a walk down whole repository trees, guided by folder summaries
+
+Why this session exists. The reviewers of 4 October asked for real nesting with vectors at inner
+nodes: whole trees, a descent within a repository, the directory's own files apart from its subtree,
+names as a baseline that vectors must add to, and the cost counted in what is read. It is also the
+first form of the idea this study came from: a summary on the folder that says what is in the box,
+so that a reader picks the right directory to walk down whatever the folder is called. Session 19
+scores single directories, at most four from a repository, and its list of every eligible directory
+shows where the kinds mix in repositories: 1,501 of 35,970 eligible directories hold an image beside
+another kept file. A leaf is mostly one kind; the mixing is above the leaves. This session takes
+repositories whole and walks them.
+
+When this was fixed. Committed on 5 October 2026 while the session 19 pod was embedding its files
+under the first encoder: no retrieval number of the new source existed. Seen by then: session 19's
+corpus counts (12,656 files in 1,600 directories of 1,079 repositories, 1,053 owners; the directory
+list above), session 22's block counts, and an estimate from session 19's list that about 7 percent
+of the repositories read would qualify as trees here (314 of 4,320, counted on eligible directories).
+
+## Definitions (fixed now)
+- Trees (scripts/tree_fetch.py). The pool is session 19's (5,517 usable repositories of 14 days),
+  read in a seeded order of its own (seed 20261106, repositories that session 19 read included). A
+  repository is taken whole when at least 8 of its listed directories hold a kept file, one of them
+  at depth 2 or more, with 40 to 300 kept files, at most 200 MB of them, and at least 5 kept files
+  with an image extension and 5 others. Listed directories, kept files and input rules are session
+  19's. Reading stops at 200 trees or 22,000 files. This set is selected for trees that hold both
+  input groups; every repository read is logged with its counts and the first rule it failed, and
+  the share that qualifies is reported. The rule counts image extensions, while the cells below use
+  image inputs, which also take in a PDF without a text layer.
+- Queries: build_gt.py's leave-one-out queries (a file in a directory of at least three files,
+  near-duplicates left out) that have a vector and whose directory holds another embedded file. The
+  target is the query's directory. Encoder E1.
+- Summaries. Every directory of a tree, with or without files of its own, has a summary of its
+  subtree; a directory with files has one of its own files too. The query is taken out of every
+  summary that held it. Policies, as scripts/budget.py defines them (hash seed 21): mean, usample,
+  fsample, sample, and all (every file at one bit, no budget). For usample, and for fsample at
+  these budgets (n is at least the six kinds), a directory's subtree summary is exactly what
+  merging its own-files summary with its children's subtree summaries gives, so the summaries
+  scored here are the ones a tree maintained by merging would hold (a stored vector then carries
+  its priority and kind, a few bytes not counted). fsample leaves a slot empty when a kind has
+  fewer files than its share, so it stores fewer vectors than usample; the vectors stored per
+  summary are reported for every policy. Two rows use no vector: names, the largest cosine between
+  the query file's whole lowercased name, extension included, and the names of a candidate's files
+  (character 3- and 4-grams, TF-IDF fitted on the names of the repository's embedded files), which
+  is what a listing of unlimited length would allow; and chance, a reader picking a candidate at
+  random at every step.
+- The walk (scripts/tree.py). The reader starts at the repository's root. At a directory it scores
+  "stay" by the directory's own-files summary and each child by the child's subtree summary (the
+  largest cosine between the float32 query and what is stored), takes the best, the first of equal
+  scores with "stay" first, and stops when "stay" wins or nothing is left to score. Success: it
+  stops in the target. Cost: one summary read per candidate scored. Flat: the own-files summary of
+  every directory of the repository is read and the best taken, the first of equal scores in the
+  order of depth and path, as in the walk; success when the target is first. Queries whose walk or
+  flat rank turns on a rival within 1e-6 are counted.
+- Budgets 2 KiB and 8 KiB per summary (8 and 32 one-bit vectors under E1; the mean in int8 and in
+  f32). The tests are read at 2 KiB.
+- Cells. all; minority: the query's input group (image inputs against the rest) holds under half of
+  the repository's other embedded files and the query's directory holds a sibling of its group.
+- Estimator: session 19's. The mean over owners of the owner's mean, percentile intervals from
+  10,000 resamples of owners; a test with fewer than 100 owners is inconclusive.
+- scripts/s23_selftest.py recomputes every walk, its first step, the summaries it read and the flat
+  rank with a second, plain implementation on synthetic trees, and must pass on the pod first.
+- Read before the commit by a reviewer instance that had not seen the code. Changed on its findings,
+  before any number: flat breaks ties by position as the walk does (it had counted a tie with the
+  target as a hit); names use the whole file name with its extension; the vectors each policy
+  stores, the reads owner-weighted and the near-ties are reported; a row for sample against usample
+  separates the kinds from fsample's empty slots; a run that stops pushes its log.
+
+## Hypotheses (fixed now, do not edit after the first evaluation)
+One family, three tests, under E1 at 2 KiB, each read on its 98.33 percent interval:
+- H23a, the loss at inner nodes: walk success with fsample minus walk success with mean on the
+  minority queries, read as session 19 reads a loss (confirmed if the lower bound is at least +0.05;
+  below +0.05 if the upper bound is under it; present with the size open if the lower bound is above
+  zero; inconclusive otherwise).
+- H23b, the kinds in a summary that merges: walk success with fsample minus with usample on the
+  minority queries. The kinds matter if the lower bound is above zero; the uniform sample is better
+  if the upper bound is below zero; no difference at the margin if the interval lies within -0.02
+  and +0.02; inconclusive otherwise.
+- H23c, the walk against reading every directory: walk success minus flat success, both with
+  fsample, over all queries. Not inferior if the lower bound is at least -0.02; inferior if the upper
+  bound is under -0.02; inconclusive otherwise. Reported with the summaries each reads.
+A reading of "below +0.05" whose interval still lies above zero is reported as an advantage smaller
+than the registered size, not as none; the same holds for H21a and H19a.
+Reported without a reading: the same three at 8 KiB; names and chance; sample and all; sample
+against usample, which is the kinds with every slot used; the first step; the walk by the depth of
+the target; the cell that is not minority; flat for every summary.
+Expectation, written before the run and not a test: H23a confirmed, since an image query in a
+repository of mostly text meets children whose means all look like text; H23b the kinds matter;
+H23c open, since a walk compounds its errors over the levels; names strong, since session 17 found
+file-name routers level with the pooled vector on leave-one-out queries.
+
+## What each outcome will mean for the paper (fixed now)
+- H23a confirmed or present: the loss is shown where repositories mix their kinds, at inner nodes,
+  with summaries that merge up the tree, and the setting of the paper is measured on trees. Below
+  +0.05 or inconclusive: the paper reports the walk as built and says that a per-kind summary did
+  not help it at the registered size.
+- H23b the kinds matter: a summary that merges needs its share per kind. No difference: the uniform
+  sample is enough for the walk. The uniform sample better: read with the vectors each stores and
+  with the row for sample against usample, since fsample's empty slots and not the kinds may be the
+  reason.
+- H23c not inferior: a reader finds the directory after reading a fraction of the summaries, and
+  the paper gives the fraction. Inferior: the paper says so and gives both costs; the summaries then
+  serve a flat read of a tree and not a descent.
+- If names beat fsample over all queries, the paper says that on leave-one-out queries in
+  repositories the file names are the stronger signal, and reports where the vectors add to them.
+- Inconclusive is reported as inconclusive.
+
+## Steps, in order
+1. This brief, scripts/tree_fetch.py, scripts/tree.py, scripts/s23_selftest.py, scripts/s23_run.sh
+   and the call at the end of scripts/s19_followup.sh in one commit, with an OpenTimestamps proof
+   of its id, before session 19's first evaluation.
+2. On the pod after session 21: the self-test, the harvest, manifest and ground truth (pushed before
+   anything is embedded), E1 embedding, tree.py. results/session23_outputs.md, verbatim.
+3. results/session23.md and NOTES.md.
+
+## Inputs and budget
+- About 22,000 files to embed under E1: about three and a half hours on the slice, about $2 of the
+  balance already there. The watcher's deadline (16:41 UTC) stands.
+
+## Rules
+- Nothing is chosen on the trees: rules, budgets, summaries and readings are fixed above.
+- One commit per deliverable. No em dashes.
