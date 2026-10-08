@@ -1,0 +1,35 @@
+{
+  "upload_type": "software",
+  "title": "dirvec-study: code, data manifests, pre-registration briefs and results for 'A few vectors for a mixed folder'",
+  "creators": [
+    {
+      "name": "Basheer, Ali",
+      "affiliation": "Craftpine Inc.",
+      "orcid": "0009-0006-2396-9932"
+    }
+  ],
+  "description": "<p>Code, data manifests, pre-registration briefs (with OpenTimestamps proofs) and per-session results for the preprint <em>A few vectors for a mixed folder: a pre-registered measurement of pooled directory embeddings</em> (Ali Basheer, 2026), <a href=\"https://doi.org/10.5281/zenodo.23178122\">doi:10.5281/zenodo.23178122</a>. Preprint, not peer reviewed.</p><p>Please cite the paper: <a href=\"https://doi.org/10.5281/zenodo.23178122\">https://doi.org/10.5281/zenodo.23178122</a>.</p>",
+  "access_right": "open",
+  "license": "mit",
+  "notes": "Code is under the MIT License. The paper source, pre-registration briefs, results and data manifests are under CC BY 4.0. Third-party material is excluded; see the License section of the README.",
+  "keywords": [
+    "directory embeddings",
+    "folder embeddings",
+    "pooled embeddings",
+    "mean pooling",
+    "modality gap",
+    "mixed-modality retrieval",
+    "vision-language embeddings",
+    "collection representation",
+    "information retrieval",
+    "pre-registration"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.23178122",
+      "relation": "isSupplementTo",
+      "resource_type": "publication-preprint",
+      "scheme": "doi"
+    }
+  ]
+}

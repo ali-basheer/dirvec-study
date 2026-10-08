@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "If you use this code, data or results, please cite the paper given under preferred-citation."
+type: software
+title: "dirvec-study: code, data manifests, pre-registration briefs and results for 'A few vectors for a mixed folder'"
+authors:
+  - family-names: Basheer
+    given-names: Ali
+    orcid: "https://orcid.org/0009-0006-2396-9932"
+    affiliation: "Craftpine Inc."
+    email: ali@basheerali.com
+repository-code: "https://github.com/ali-basheer/dirvec-study"
+url: "https://www.craftpine.com/dirvec"
+abstract: >-
+  Code, data manifests, pre-registration briefs (with OpenTimestamps proofs) and
+  per-session results for a pre-registered measurement of what one mean vector
+  loses when it stands for a folder of mixed files, and what a folder's few
+  kilobytes of metadata can store instead.
+keywords:
+  - directory embeddings
+  - folder embeddings
+  - pooled embeddings
+  - mean pooling
+  - modality gap
+  - mixed-modality retrieval
+  - vision-language embeddings
+  - collection representation
+  - information retrieval
+  - pre-registration
+license: MIT
+preferred-citation:
+  type: generic
+  status: preprint
+  title: "A few vectors for a mixed folder: a pre-registered measurement of pooled directory embeddings"
+  authors:
+    - family-names: Basheer
+      given-names: Ali
+      orcid: "https://orcid.org/0009-0006-2396-9932"
+      affiliation: "Craftpine Inc."
+  year: 2026
+  month: 10
+  date-published: 2026-10-06
+  version: "1"
+  publisher:
+    name: Zenodo
+  doi: 10.5281/zenodo.23178122
+  url: "https://doi.org/10.5281/zenodo.23178122"
+  license: CC-BY-4.0
+  notes: "Preprint, not peer reviewed. Code and data: https://github.com/ali-basheer/dirvec-study"
