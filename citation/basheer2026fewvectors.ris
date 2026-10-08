@@ -1,0 +1,19 @@
+TY  - RPRT
+T1  - A few vectors for a mixed folder: a pre-registered measurement of pooled directory embeddings
+AU  - Basheer, Ali
+PY  - 2026
+DA  - 2026/10/06
+PB  - Zenodo
+ET  - 1
+M3  - Preprint
+DO  - 10.5281/zenodo.23178122
+UR  - https://doi.org/10.5281/zenodo.23178122
+KW  - directory embeddings
+KW  - pooled embeddings
+KW  - modality gap
+KW  - multimodal retrieval
+KW  - information retrieval
+KW  - pre-registration
+LA  - en
+N1  - Preprint, not peer reviewed. Code and data: https://github.com/ali-basheer/dirvec-study
+ER  - 

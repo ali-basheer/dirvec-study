@@ -1,0 +1,31 @@
+[
+  {
+    "id": "basheer2026fewvectors",
+    "type": "article",
+    "genre": "Preprint",
+    "title": "A few vectors for a mixed folder: a pre-registered measurement of pooled directory embeddings",
+    "author": [
+      {
+        "family": "Basheer",
+        "given": "Ali"
+      }
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          2026,
+          10,
+          6
+        ]
+      ]
+    },
+    "publisher": "Zenodo",
+    "version": "1",
+    "DOI": "10.5281/zenodo.23178122",
+    "URL": "https://doi.org/10.5281/zenodo.23178122",
+    "language": "en",
+    "abstract": "A folder's metadata is read before its files and holds a few kilobytes. A vector stored there can route a query without opening the folder, and the cheapest is the mean of its files' embeddings. We ask when the mean is enough and what to store when it is not. Under our main vision-language embedder, the mean does at least as well as a few representatives on GitHub directories that do not mix media, about 95 percent of those eligible. Representatives for mixed folders only are level with the mean over all directories (both post hoc). Where a folder mixes images and texts, the mean loses its minority modality. On Zenodo record folders a held-out minority file finds its folder 0.16 to 0.25 recall@5 less often with the mean than with a few per-modality representatives under two vision-language embedders, and 0.35 to 0.50 less often under two CLIP-family dual towers. There, four representatives per label are not inferior to searching every file, at a 0.02 margin, over all queries and in every cell under all four encoders (post hoc). On queries that a language model wrote as a simulated searcher, the loss under the main embedder is 0.14 (interval 0.02 to 0.28) for pictures in text-heavy folders and 0.42 (0.28 to 0.56) for documents in image-heavy ones. At three per label every folder's representatives fit in 8 KiB at a further cost of at most 0.012 in any cell. In 2 KiB a per-kind sample of the folder's files keeps the minority files the mean loses, and on ext4 a summary of 2,048 or 4,000 bytes costs 1.2 blocks per cold directory read. With every creator weighted equally the main embedder's file-query loss is 0.13 and 0.14, and 0.06 and 0.12 on queries whose names do not give the folder away. Every hypothesis was fixed in a brief before its test. Five briefs are timestamped externally, the rest dated by the working repository's history. Code, manifests and briefs are released.",
+    "keyword": "information retrieval, embeddings, multimodal retrieval, pre-registration",
+    "note": "Preprint, not peer reviewed. Code and data: https://github.com/ali-basheer/dirvec-study"
+  }
+]
