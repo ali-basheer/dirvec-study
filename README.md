@@ -4,10 +4,6 @@ A pre-registered measurement of what one mean embedding loses when it stands for
 images and texts, and of what a folder's few kilobytes of metadata can store instead.
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23178122.svg)](https://doi.org/10.5281/zenodo.23178122)
-[![Preprint: not peer reviewed](https://img.shields.io/badge/preprint-not%20peer%20reviewed-lightgrey)](https://www.craftpine.com/dirvec)
-[![ORCID 0009-0006-2396-9932](https://img.shields.io/badge/ORCID-0009--0006--2396--9932-a6ce39)](https://orcid.org/0009-0006-2396-9932)
-[![Code: MIT](https://img.shields.io/badge/code-MIT-blue)](LICENSE)
-[![Paper, briefs, results, data: CC BY 4.0](https://img.shields.io/badge/paper%2C%20data-CC%20BY%204.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
 
 ## Paper
 
@@ -19,11 +15,8 @@ images and texts, and of what a folder's few kilobytes of metadata can store ins
 - **DOI:** [10.5281/zenodo.23178122](https://doi.org/10.5281/zenodo.23178122)
 - **Zenodo:** https://zenodo.org/records/23178122
 
-Code, data manifests, pre-registration briefs and results for the study *A few vectors for a mixed
-folder: a pre-registered measurement of pooled directory embeddings* (Ali Basheer, 2026).
-
-Paper (preprint, not peer reviewed): https://doi.org/10.5281/zenodo.23178122, also at
-https://www.craftpine.com/dirvec. The PDF published there has SHA-256
+This repository holds the study's code, data manifests, pre-registration briefs and results. The
+paper is also at https://www.craftpine.com/dirvec. The PDF published there has SHA-256
 `8bef21aed187c640b44ebeb35f17b89704fc0df508e0e21186e8dbb82a9d5068`.
 
 ## Abstract
@@ -55,58 +48,33 @@ The study asks when the mean of a folder's file embeddings is enough and what it
 folder mixes images and texts. It measures this on Zenodo record folders, on directories of public
 GitHub repositories and on queries that a language model wrote as a simulated searcher, under four
 encoders, and tests what a folder's few kilobytes of metadata can keep instead. Every test was written
-into a brief with its criterion before the numbers that decide it were computed.
-
-The paper asks it as a series of questions: when is the mean enough; what does the mean lose in a
-mixed folder; does the loss reach a simulated searcher's queries; why; what fixes it, and at what
-budget; does a folder summary guide a walk down a tree; and does a written folder abstract do
-better.
+into a brief with its criterion before the numbers that decide it were computed. The paper splits
+the question into the seven listed under [Results](#results).
 
 ## Key findings
 
-All from the paper. "Post hoc" marks analyses the paper itself marks post hoc.
+For folders that do not mix media, the mean is enough. Mixed directories are 4 to 5 percent of
+eligible GitHub directories, and on the others the mean does at least as well as a few
+representatives under the main vision-language embedder (post hoc). Where a folder mixes images and
+texts, the mean loses its minority modality. On Zenodo record folders a held-out minority file finds
+its folder 0.16 to 0.25 recall@5 less often with the mean than with a few per-modality
+representatives under two vision-language embedders, and 0.35 to 0.50 less often under two
+CLIP-family dual towers. On those folders four representatives per label are not inferior to
+searching every file, at a 0.02 margin, over all queries and in every cell under all four encoders
+(post hoc). At three per label every folder's representatives fit in 8 KiB at a further cost of at
+most 0.012 in any cell. The loss also shows on queries that a language model wrote as a simulated
+searcher. "Post hoc" marks what the paper marks post hoc.
 
-- **For folders that do not mix media, the mean is enough.** Mixed directories are 4 to 5 percent of eligible GitHub
-  directories, and on the others the mean does at least as well as a few representatives under the
-  main vision-language embedder (post hoc).
-- **Where a folder mixes images and texts, the mean loses its minority modality.** On Zenodo record
-  folders a held-out minority file finds its folder 0.16 to 0.25 recall@5 less often with the mean
-  than with a few per-modality representatives under two vision-language embedders, and 0.35 to 0.50
-  less often under two CLIP-family dual towers.
-- **The loss reaches queries that are not files.** On queries that a language model wrote as a
-  simulated searcher, the loss under the main embedder is 0.14 (interval 0.02 to 0.28) for pictures
-  in text-heavy folders and 0.42 (0.28 to 0.56) for documents in image-heavy ones.
-- **A few representatives per kind fix it.** On Zenodo record folders, four representatives per
-  label are not inferior to searching every file, at a 0.02 margin, over all queries and in every
-  cell under all four encoders (post hoc). None of the single vectors tried, centering included,
-  recovers the loss without giving up the majority.
-- **It fits in a folder's metadata.** At three per label every folder's representatives fit in
-  8 KiB at a further cost of at most 0.012 in any cell. On ext4 a summary of 2,048 or 4,000 bytes
-  costs 1.2 blocks per cold directory read.
+## Where it applies
 
-## Why it matters
-
-The paper measures folders and collections represented by vectors. That question sits under several
-kinds of system. The points below say where the results are relevant; the paper did not evaluate
-any of these systems or products.
-
-- **Directory-level representations.** A folder's metadata can be read before its files. The paper
-  measures what a vector stored there, in a few kilobytes, can keep, and how many ext4 blocks such a
-  summary costs to read.
-- **Multimodal retrieval.** Embedders that put images and texts in one space can still leave the two
-  in offset regions (the modality gap), and the paper finds such a gap on its files. It shows what
-  that does to a folder's mean when the folder holds both.
-- **Vector search and semantic search over collections.** Any index that keeps one vector per
-  folder, collection or source and routes queries on it faces the question the paper measures. On
-  its corpora, the mean did as well as a few representatives for folders that do not mix media, and
-  lost the minority modality in folders that do, where a few per-modality representatives recovered
-  it. At the scale measured, a folder layer bought nothing over a flat approximate index.
-- **Retrieval-augmented generation.** RAG systems route a query to a source before searching inside
-  it, and one router cited by the paper takes the centroid of each source's document embeddings as
-  an input. The paper measures what such a centroid loses when a source mixes media.
-- **AI file search.** Semantic file systems and embedding-based file search represent a user's
-  files by meaning. The paper's folders are Zenodo records and GitHub directories; personal working
-  directories, mailboxes and agent memories were not measured.
+The paper's discussion gives a rule for any system that keeps one vector per folder, collection or
+source and routes queries on it, such as a source router for retrieval-augmented generation (one
+router the paper cites takes each source's centroid as an input), an agent's directory-shaped memory
+or a folder-level file search. Where a folder does not mix images with other files, keep the mean.
+Where it does, keep a few representatives per kind. A file system tells the two apart by file type
+without embedding anything. At the scale measured, a folder layer bought nothing over a flat HNSW
+index. The paper evaluated none of these systems, and its folders are Zenodo records and GitHub
+directories; personal working directories, mailboxes and agent memories were not measured.
 
 ## Method
 
@@ -189,7 +157,7 @@ be compared with a block explorer's.
 
 ## Results
 
-The paper's answers to its questions, in brief. Every pre-registered hypothesis and its verdict is
+The paper's answers to its questions. Every pre-registered hypothesis and its verdict is
 listed in the paper's appendix, and each session's results file in `results/` gives its full tables,
 readings and deviations.
 
